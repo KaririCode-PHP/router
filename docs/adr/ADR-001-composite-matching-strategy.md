@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — V4.0.0
+Accepted — V4.0.0; amended in 4.1 (see Amendment)
 
 ## Date
 
@@ -118,3 +118,18 @@ Compile routes to a static PHP `switch`/regex function. Deferred: planned as a f
 - Popov, N. (2014). "Fast request routing using regular expressions." https://nikic.github.io/2014/02/18/Fast-request-routing-using-regular-expressions.html
 - Grekas, N. (2018). "Making Symfony's Router 77.7x faster." https://symfony.com/blog/new-in-symfony-4-1-fastest-php-router
 - ARFA 1.3 — P1 (Immutable State), P4 (Protocol Agnosticism)
+
+## Amendment (4.1, 2026-11-27)
+
+The 4.0 regex tier never matched a parameterized route. The mark was an empty group `()`, and the match walked backwards past every empty capture, so it skipped the mark it was looking for (code review BUG-003); and named groups clashed as soon as two routes in one chunk used the same parameter name, which PCRE rejects at compile time. The tests that would have shown it could not run: `RouteEntry` declared a `callable` property, which PHP refuses to load.
+
+4.1 keeps the two tiers and changes how a chunk is built:
+
+- Each route contributes a fragment with positional groups (`RoutePattern::$fragment`), followed by `(*MARK:n)`, where n is its index in the chunk.
+- The chunk is a branch-reset group, `#\A(?|f0(*MARK:0)|f1(*MARK:1)|…)\z#u`: groups restart at 1 in every alternative, `$matches['MARK']` names the route, and captures map to parameter names by position. This is FastRoute's mark-based dispatcher.
+- With no group-count growth, the chunk size rises from 10 to 30, FastRoute's value for mark-based chunks.
+- Anchors are `\A` and `\z`, so a trailing newline no longer matches, and no built-in type matches a control character.
+- A path that is static for one method and matches a pattern for another reports both tiers' methods in a 405.
+
+The Risks table's `PREG_UNMATCHED_AS_NULL` mitigation is no longer needed: every alternative's groups participate, and the mark is explicit.
+

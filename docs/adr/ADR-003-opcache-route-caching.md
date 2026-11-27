@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — V4.0.0 (implementation in progress, see §Current State)
+Accepted — V4.0.0; implemented in 4.1 (see Amendment)
 
 ## Date
 
@@ -130,3 +130,12 @@ For read-only containers, two approaches:
 - PHP OPcache — https://www.php.net/manual/en/opcache.configuration.php
 - POSIX atomic rename — https://man7.org/linux/man-pages/man2/rename.2.html
 - ARFA 1.3 — P1 (Immutable State): cached data is read-only after generation
+
+## Amendment (4.1, 2026-11-27)
+
+The plan above is implemented, with three changes:
+
+- **Stores.** `CachedMatcher` keeps the table in a `Contract\RouteCacheStore` (ADR-009). `Cache\PhpFileStore` is the OPcache file of this ADR: temporary file, `rename()`, `opcache_invalidate()`, PHP warnings turned into `RouteCacheException`. `Integration\SimpleCacheStore` keeps the same table in a PSR-16 cache, for read-only containers or hosts without OPcache, which the 4.0 `CacheBridge` promised and never did (code review BUG-002).
+- **Freshness.** The table carries a format version and a SHA-256 of every route as written. When the inner matcher has routes, the table is used only if the checksum matches them, so a table left by an earlier deploy is ignored instead of serving old routes. An application that skips registering routes when `isCached()` is true gets the full saving.
+- **What cannot be cached** fails at `warm()` with `RouteCompilationException`: a Closure handler, metadata holding objects, or an inner matcher other than `CompositeRouteMatcher` (ADR-007).
+

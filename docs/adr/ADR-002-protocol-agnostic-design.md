@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — V4.0.0
+Accepted — V4.0.0; amended in 4.1 (see Amendment)
 
 ## Date
 
@@ -166,3 +166,10 @@ final class CliAdapter
 - ARFA 1.3 — P4 (Protocol Agnosticism): "Components MUST NOT couple to protocol-specific abstractions at the contract level."
 - PSR-7: HTTP Message Interfaces — https://www.php-fig.org/psr/psr-7/
 - PSR-15: HTTP Server Request Handlers — https://www.php-fig.org/psr/psr-15/
+
+## Amendment (4.1, 2026-11-27)
+
+- Methods are plain strings in every API (`RouteEntry::$methods`, `RouteRegistry::route()`, `#[Route(method: 'SUBSCRIBE')]`), stored uppercase and checked against the RFC 9110 token grammar. `Enum\HttpMethod` is deprecated and kept only for 4.0 attribute code.
+- `Contract\RequestNormalizer` and `Core\NormalizedRequest` give protocol packages a standard way to hand the router a method and a path; each protocol implements the normalizer in its own package (kariricode/http, grpc, websocket, graphql, sse), so the router never depends on them.
+- `RequestNormalizer::canNormalize()` and `normalize()` take `object`, and `NormalizedRequest::$original` is an `object`: the router cannot name a protocol's request type. This is the one accepted deviation from the rule against `object` parameters; the conformance suite enforces the list.
+

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — Target V4.1.0
+Proposed — not part of 4.1, which brings the 4.0 code to the Specification first (ADR-007 to ADR-009); retargeted to 4.2
 
 ## Date
 

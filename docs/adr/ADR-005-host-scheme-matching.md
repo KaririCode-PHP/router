@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — Target V4.1.0
+Proposed — not part of 4.1, which brings the 4.0 code to the Specification first (ADR-007 to ADR-009); retargeted to 4.2
 
 ## Date
 
@@ -137,3 +137,8 @@ Non-breaking. `MatchContext` is optional. Routes without host/scheme constraints
 - Symfony host requirements — https://symfony.com/doc/current/routing.html#sub-domain-routing
 - Laravel domain routing — https://laravel.com/docs/routing#route-group-subdomain-routing
 - ARFA 1.3 — P4 (Protocol Agnosticism): host/scheme are protocol metadata, not protocol coupling
+
+## Note (4.1)
+
+Until this ADR is implemented, `RouteEntry::$host` and `$scheme` are carried to the dispatcher and documented as such (README, `Attribute\Controller`): no matcher reads them, so they must not be relied on for access control.
+

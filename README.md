@@ -1,23 +1,8 @@
 # KaririCode Router
 
-High-performance, protocol-agnostic routing engine for PHP 8.4+ with typed parameter constraints, compiled group-regex matching, attribute-based route definition, and deep KaririCode ecosystem integration.
+Protocol-agnostic routing for PHP 8.4+. The router resolves a method and a path, both plain strings, to the route that serves them: static paths through a hash map, paths with placeholders through a few combined PCRE expressions per method. Routes come from a fluent API, groups, PHP attributes or route files, and every definition is checked when it is registered. The compiled table can live in an OPcache file or a PSR-16 cache.
 
-## Overview
-
-KaririCode Router resolves `(method, uri)` pairs to handlers through a two-tier matching strategy: O(1) hash-map lookup for static routes and compiled group-regex for parameterized routes. The engine is protocol-agnostic (ARFA 1.3 P4), serving HTTP, gRPC, WebSocket, and CLI with the same routing core.
-
-## Features
-
-- **Two-tier matching** — static O(1) + compiled regex, automatically classified at registration
-- **Typed parameters** — `{id:int}`, `{slug:slug}`, `{uuid:uuid}`, `{path:any}` with constraint validation
-- **PHP 8.4 attributes** — `#[Route]`, `#[Controller]` for zero-config route definition
-- **Route groups** — nested prefixes, middleware inheritance, name prefixes
-- **URL generation** — reverse routing with constraint validation and query string support
-- **OPcache file caching** — zero-overhead production matching after warm-up
-- **Protocol agnostic** — raw `(string, string)` interface, no PSR-7 coupling
-- **Middleware pipeline** — onion-model with protocol-agnostic context
-- **Ecosystem bridges** — Cache, EventDispatcher, Configurator, Observability
-- **Zero external deps** — only `kariricode/contract` required
+Because methods are strings, the same router serves HTTP verbs, gRPC operations (`UNARY`), WebSocket events (`SUBSCRIBE`) or CLI commands (`RUN`). Protocol packages such as kariricode/http provide a `RequestNormalizer` that turns their request into those two strings; the router depends on none of them.
 
 ## Installation
 
@@ -25,146 +10,219 @@ KaririCode Router resolves `(method, uri)` pairs to handlers through a two-tier 
 composer require kariricode/router
 ```
 
-## Quick Start
+PHP 8.4 or later. The runtime needs only kariricode/exception, which brings kariricode/contract.
+
+## Quick start
 
 ```php
 use KaririCode\Router\Core\RouteRegistry;
 use KaririCode\Router\Generator\RouteUrlGenerator;
 
 $router = new RouteRegistry();
-
-$router->get('/users', 'UserController::index', 'users.index');
-$router->get('/users/{id:int}', 'UserController::show', 'users.show');
-$router->post('/users', 'UserController::store', 'users.store');
+$router->get('/users', [UserController::class, 'index'], 'users.index')
+    ->get('/users/{id:int}', [UserController::class, 'show'], 'users.show')
+    ->post('/users', [UserController::class, 'store'], 'users.store');
 
 $result = $router->match('GET', '/users/42');
-$result->handler();              // 'UserController::show'
-$result->parameters->get('id');  // '42'
-$result->routeName();            // 'users.show'
+$result->handler();                  // [UserController::class, 'show']
+$result->parameters->getInt('id');   // 42
+$result->routeName();                // 'users.show'
 
-// URL generation
-$gen = new RouteUrlGenerator($router);
-$gen->generate('users.show', ['id' => 42]);  // '/users/42'
+(new RouteUrlGenerator($router))->generate('users.show', ['id' => 42]); // '/users/42'
 ```
 
-## Route Definition
+The handler is a definition: the router never calls it. Your dispatcher resolves `'Controller::action'`, `[Controller::class, 'action']`, a service id or a Closure.
 
-### Fluent API
+## Defining routes
+
+### Fluent API and any protocol
 
 ```php
-$router->get('/path', handler, name, middleware);
-$router->post('/path', handler, name, middleware);
-$router->put('/path', handler, name, middleware);
-$router->patch('/path', handler, name, middleware);
-$router->delete('/path', handler, name, middleware);
+$router->get('/health', 'HealthCheck');                 // GET and HEAD
+$router->put('/users/{id:int}', 'UserUpdate', 'users.update', middleware: ['auth']);
+$router->route(['UNARY'], '/greeter.Greeter/{method}', 'GrpcGateway', 'grpc');
+$router->route(['GET'], '/reports/{format}', 'Reports', 'reports', defaults: ['format' => 'pdf'], metadata: ['cache' => 60]);
 ```
 
 ### Groups
 
 ```php
-$router->group('/api/v1', function ($group): void {
-    $group->get('/users', 'UserController::index', 'users.index');
+use KaririCode\Router\Core\RouteGroup;
 
-    $group->group('/admin', function ($admin): void {
-        $admin->get('/stats', 'AdminController::stats', 'stats');
-    }, middleware: ['AdminAuth'], namePrefix: 'admin.');
-}, middleware: ['ApiAuth'], namePrefix: 'api.');
+$router->group('/api/v1', static function (RouteGroup $api): void {
+    $api->get('/users', 'UserIndex', 'users');
+
+    $api->group('/admin', static function (RouteGroup $admin): void {
+        $admin->get('/stats', 'AdminStats', 'stats');   // GET /api/v1/admin/stats, named api.admin.stats
+    }, middleware: ['auth.admin'], namePrefix: 'admin.');
+}, middleware: ['auth.api'], namePrefix: 'api.');
 ```
 
-### PHP 8.4 Attributes
+Middleware runs outer group first, then inner group, then the route's own.
+
+### Attributes
 
 ```php
-use KaririCode\Router\Attribute\{Controller, Route};
-use KaririCode\Router\Enum\HttpMethod;
+use KaririCode\Router\Attribute\Controller;
+use KaririCode\Router\Attribute\Route;
+use KaririCode\Router\Core\AttributeRouteLoader;
 
-#[Controller('/api/v1/posts', middleware: ['Auth'], namePrefix: 'posts.')]
-class PostController
+#[Controller('/api/v1/posts', middleware: ['auth'], namePrefix: 'posts.')]
+final class PostController
 {
-    #[Route('/', method: HttpMethod::Get, name: 'index')]
-    public function index(): void { }
+    #[Route('/{id:int}', method: ['GET', 'HEAD'], name: 'show')]
+    public function show(): void {}
 
-    #[Route('/{id:int}', method: HttpMethod::Get, name: 'show')]
-    public function show(int $id): void { }
-
-    #[Route('/', method: HttpMethod::Post, name: 'store')]
-    public function store(): void { }
+    #[Route('/', method: 'POST', name: 'store')]
+    public function store(): void {}
 }
 
-// Load from attributes
-$loader = new AttributeRouteLoader();
-foreach ($loader->loadFromClass(PostController::class) as $route) {
+foreach ((new AttributeRouteLoader())->loadFromClass(PostController::class) as $route) {
     $router->addRoute($route);
 }
 ```
 
-## Parameter Types
+The prefix and the pattern are joined as written: `#[Route('/')]` under `/api/v1/posts` is `/api/v1/posts/`.
 
-| Type   | Syntax          | Pattern                          | Example            |
-|--------|-----------------|----------------------------------|--------------------|
-| string | `{name}`        | `[^/]+`                          | `/users/john`      |
-| int    | `{id:int}`      | `[0-9]+`                         | `/users/42`        |
-| slug   | `{slug:slug}`   | `[a-z0-9]+(?:-[a-z0-9]+)*`      | `/posts/hello-world` |
-| uuid   | `{uuid:uuid}`   | UUID v4 pattern                  | `/items/550e8400-...` |
-| any    | `{path:any}`    | `.+` (greedy)                    | `/files/a/b/c.txt` |
-
-## Architecture
-
-The matching pipeline:
-
-1. **RouteRegistry** receives `match(method, uri)`
-2. **CompositeRouteMatcher** tries **StaticMatcher** (O(1) hash) first
-3. On miss, falls through to **RegexMatcher** (compiled group-regex)
-4. Returns immutable **MatchResult** or throws 404/405
-
-## Ecosystem Integration
+### Route files
 
 ```php
-// Cache bridge — OPcache file caching
-$cache = new CacheBridge($cacheInstance, 'routes');
-$cache->warmOrRestore($router);
-
-// Event bridge — route lifecycle events
-$events = new EventDispatcherBridge($dispatcher);
-$events->routeMatched($result, $durationMs);
-
-// Config bridge — load routes from PHP array files
-$config = new ConfiguratorBridge();
-$config->loadFile($router, 'config/routes.php');
-
-// Observability — metrics and tracing
-$obs = new ObservabilityBridge($metricsCollector);
-$obs->recordMatch($result, $durationMs);
+// config/routes.php
+return [
+    ['GET', '/health', 'HealthCheck', 'health'],
+    ['GET|POST', '/search', 'Search', 'search', 'middleware' => ['throttle'], 'defaults' => ['page' => '1']],
+    ['group' => '/admin', 'middleware' => ['auth'], 'name_prefix' => 'admin.', 'routes' => [
+        ['GET', '/stats', 'AdminStats', 'stats'],
+    ]],
+];
 ```
 
-## Error Handling
+```php
+use KaririCode\Router\Core\ArrayRouteLoader;
 
-| Exception                   | Code | When                       |
-|-----------------------------|------|----------------------------|
-| RouteNotFoundException      | 5110 | No route matches           |
-| MethodNotAllowedException   | 5111 | URI exists, wrong method   |
-| UrlGenerationException      | 5120 | Missing param, constraint  |
-| RouteCompilationException   | 5140 | Cache write failure        |
+foreach ((new ArrayRouteLoader())->loadFile(__DIR__ . '/config/routes.php') as $route) {
+    $router->addRoute($route);
+}
+```
 
-`MethodNotAllowedException` exposes `$e->allowedMethods` for the `Allow` header.
+## Pattern syntax
 
-## Testing
+| Placeholder | Matches |
+|---|---|
+| `{name}` | one path segment (no "/", no control characters) |
+| `{id:int}` | decimal digits (`integer` is an alias) |
+| `{slug:slug}` | lowercase words joined by "-" |
+| `{id:uuid}` | 8-4-4-4-12 hexadecimal, any case |
+| `{path:any}` | the rest of the path, "/" included |
+
+Patterns match the raw path, without percent-decoding. A mistake fails when the route is defined, never on a request: `{id:\d+}`, `{user-id}`, a stray brace, a repeated name, a pattern without a leading "/", a second route for the same method and pattern, or a second route with the same name all throw `RouteCompilationException`.
+
+A static route beats a pattern that also matches its path, whatever the order: `/users/new` wins over `/users/{id}`. Among patterns of one method, the first registered wins.
+
+## URL generation
+
+```php
+$generator = new RouteUrlGenerator($router);
+$generator->generate('users.show', ['id' => 42, 'tab' => 'posts']);   // '/users/42?tab=posts'
+$generator->generate('files.show', ['path' => 'docs/2026/report final.pdf']);
+// '/files/docs/2026/report%20final.pdf'
+$generator->withBase('https://api.example.com')->generate('users.index', [], ['page' => '2']);
+// 'https://api.example.com/users?page=2'
+```
+
+## Caching the compiled table
+
+```php
+use KaririCode\Router\Cache\PhpFileStore;
+use KaririCode\Router\Matcher\CachedMatcher;
+use KaririCode\Router\Matcher\CompositeRouteMatcher;
+
+$matcher = new CachedMatcher(new CompositeRouteMatcher(), new PhpFileStore(__DIR__ . '/var/cache/routes.php'));
+$router = new RouteRegistry($matcher);
+
+if (!$matcher->isCached()) {
+    require __DIR__ . '/config/routes.php'; // registers on $router
+    $matcher->warm();                        // usually a deploy step
+}
+```
+
+With OPcache on, the table file is read from shared memory. `Integration\SimpleCacheStore` keeps the same table in any PSR-16 cache (`composer require psr/simple-cache` plus an implementation). A table written for other routes is ignored; Closure handlers cannot be cached.
+
+## Observing matches
+
+```php
+use KaririCode\Router\Core\MatchStatistics;
+use KaririCode\Router\Core\ObservedRouter;
+use KaririCode\Router\Integration\EventDispatcherBridge;
+
+$statistics = new MatchStatistics();
+$observed = new ObservedRouter($router, $statistics);
+$observed->match('GET', '/users/42');
+$statistics->averageDurationNs();
+
+$evented = new ObservedRouter($router, new EventDispatcherBridge($psr14Dispatcher)); // RouteMatched, RouteMissed events
+```
+
+Observers get the method, the result or the failure and the duration, never the path.
+
+## Middleware
+
+```php
+use KaririCode\Router\Middleware\MiddlewarePipeline;
+
+$response = (new MiddlewarePipeline())->execute($middlewareInstances, $handler, $context);
+```
+
+`Contract\Middleware` works on a context array, so the same middleware serves every protocol. PSR-15 middleware stays in kariricode/http.
+
+## Errors
+
+Every exception extends a family of kariricode/exception, so an edge can map it without knowing the router. Codes are in block 5000–5099 of the ecosystem registry, prefix RO; messages never repeat the client's method, path or values.
+
+| Exception | Family | Codes | When |
+|---|---|---|---|
+| `RouteNotFoundException` | NotFound | 5010, 5021 | no route for the path; no route with that name |
+| `MethodNotAllowedException` | NotFound | 5011 | the path exists for other methods; `$e->allowedMethods` feeds the Allow header |
+| `UrlGenerationException` | Validation | 5020, 5022 | missing parameter; value breaks its type |
+| `RouteCompilationException` | Configuration | 5000–5006, 5040–5042 | invalid route definitions; what the cache cannot hold |
+| `RouteFileException` | Configuration | 5050–5052 | route file missing, not an array, or an invalid entry |
+| `RouteCacheException` | Runtime | 5045–5046 | the cache directory or store refused the write |
+
+`RouteEntry::$host` and `$scheme` are carried to your dispatcher; no matcher reads them yet (ADR-005), so do not rely on them for access control.
+
+## Development
+
+The quality toolchain is installed by [KaririCode Devkit](https://github.com/KaririCode-PHP/devkit) (`kcode`) at the versions `devkit.php` pins, and runs with the configs at the root of this repository.
 
 ```bash
-./vendor/bin/phpunit
+# kcode 1.2.1, checked against its published SHA-256
+curl -fsSLo kcode.phar https://github.com/KaririCode-PHP/devkit/releases/download/v1.2.1/kcode.phar
+echo "1bc43b06798b4e7fc1df341cc505f316549f0dd5efb9c8d80031415b0cdf3e3b  kcode.phar" | sha256sum -c -
+sudo install -m 0755 kcode.phar /usr/local/bin/kcode
+
+composer install   # runtime: kariricode/exception, kariricode/contract
+kcode init         # toolchain into .kcode/
+composer check     # style, PHPStan max, Psalm 1, complexity, the three suites, mutation
+composer security  # audit of the runtime and the toolchain, secret scan
 ```
+
+| Command | Gate |
+|---|---|
+| `composer test` | unit, integration and conformance suites |
+| `composer test-conformance` | KaririCode Spec V4.3.3 §29.2 rules |
+| `composer phpstan` / `composer psalm` | level max / errorLevel 1 |
+| `composer complexity` | §13 budgets |
+| `composer mutation` | Infection, MSI ≥ 80% |
+| `composer cs-check` / `composer cs-fix` | PER Coding Style |
+| `composer sbom` | CycloneDX 1.5 SBOM |
 
 ## Documentation
 
-| Document | Location |
-|----------|----------|
-| ADR-001: Composite Matching | `docs/adr/ADR-001-composite-matching-strategy.md` |
-| ADR-002: Protocol Agnostic  | `docs/adr/ADR-002-protocol-agnostic-design.md` |
-| ADR-003: OPcache Caching    | `docs/adr/ADR-003-opcache-route-caching.md` |
-| ADR-004: Optional Params    | `docs/adr/ADR-004-optional-params-custom-constraints.md` |
-| ADR-005: Host Matching      | `docs/adr/ADR-005-host-scheme-matching.md` |
-| ADR-006: Trailing Slash     | `docs/adr/ADR-006-trailing-slash-and-fallback.md` |
-| SPEC-001: Architecture      | `docs/spec/SPEC-001-router-architecture.md` |
+- [SPEC-001: router architecture](docs/spec/SPEC-001-router-architecture.md)
+- [Quality report against Spec V4.3.3](docs/quality/QD-V433-COMPLIANCE.md)
+- ADRs: [001 composite matching](docs/adr/ADR-001-composite-matching-strategy.md), [002 protocol-agnostic design](docs/adr/ADR-002-protocol-agnostic-design.md), [003 route cache](docs/adr/ADR-003-opcache-route-caching.md), [004 optional parameters (proposed)](docs/adr/ADR-004-optional-params-custom-constraints.md), [005 host and scheme (proposed)](docs/adr/ADR-005-host-scheme-matching.md), [006 trailing slash and fallback (proposed)](docs/adr/ADR-006-trailing-slash-and-fallback.md), [007 exceptions and codes](docs/adr/ADR-007-exception-families-and-code-block.md), [008 toolchain](docs/adr/ADR-008-toolchain-through-kcode.md), [009 observers and PSR integration](docs/adr/ADR-009-observers-and-psr-integration.md)
+- [Upgrading from the 4.0 code](UPGRADE.md)
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE).

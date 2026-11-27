@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — Target V4.1.0
+Proposed — not part of 4.1, which brings the 4.0 code to the Specification first (ADR-007 to ADR-009); retargeted to 4.2
 
 ## Date
 
@@ -151,3 +151,8 @@ Non-breaking. Existing patterns without brackets or custom regex continue to wor
 - nikic/FastRoute optional segments — https://github.com/nikic/FastRoute#defining-routes
 - Laravel optional parameters — https://laravel.com/docs/routing#parameters-optional-parameters
 - PCRE pattern syntax — https://www.php.net/manual/en/reference.pcre.pattern.syntax.php
+
+## Note (4.1)
+
+4.1 rejects any placeholder that is not `{name}` or `{name:type}` with a built-in type, so `{date:regex(...)}` and `[/{slug}]` fail when the route is defined instead of becoming literal text. Adding this ADR's syntax later is therefore additive: patterns that compile under 4.1 keep their meaning.
+
