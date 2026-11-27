@@ -4,42 +4,47 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Attribute;
 
+use Attribute;
 use KaririCode\Router\Enum\HttpMethod;
 
 /**
- * Declares a route on a controller method.
+ * Declares a route on a controller method; AttributeRouteLoader turns it
+ * into a RouteEntry whose handler is [class, method]. The attribute is
+ * repeatable, so one method can serve several patterns.
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): accepts both string literals
- * and the deprecated HttpMethod enum for backward compatibility.
- * String literals are preferred for multi-protocol routing.
- * Spec V4.0: final readonly class with promoted constructor properties.
+ * Preconditions: methods are strings of any protocol ('GET', 'UNARY',
+ * 'SUBSCRIBE'), stored uppercase; the deprecated HttpMethod enum is still
+ * accepted. A null pattern means "/" plus the method name. Validation of
+ * the pattern and methods happens when the loader builds the RouteEntry.
  *
- * Usage (string — recommended, protocol-agnostic):
+ * Thread-safety: immutable.
  *
- *     #[Route('/users/{id:int}', method: 'GET', name: 'users.show')]
- *     public function show(int $id): Response { ... }
+ * Side effects: none.
  *
- * Usage (HttpMethod enum — backward compatible):
+ * Example:
  *
- *     #[Route('/users/{id:int}', method: HttpMethod::Get, name: 'users.show')]
- *     public function show(int $id): Response { ... }
+ *     #[Route('/users/{id:int}', method: ['GET', 'HEAD'], name: 'users.show')]
+ *     #[Route('/members/{id:int}', name: 'members.show')]
+ *     public function show(): Response { ... }
  *
- * When used on a class, defines defaults inherited by all methods
- * (prefix, middleware, name prefix).
+ * References: SPEC-001 §2.4; ADR-002 (method strings); PHP attributes.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path pattern
+ * @see https://www.php.net/manual/en/language.attributes.php
  */
-#[\Attribute(\Attribute::TARGET_METHOD | \Attribute::TARGET_CLASS | \Attribute::IS_REPEATABLE)]
+#[Attribute(Attribute::TARGET_METHOD | Attribute::IS_REPEATABLE)]
 final readonly class Route
 {
-    /** @var list<string> Uppercase method strings. */
+    /** @var list<string> uppercase method strings */
     public array $methods;
 
     /**
-     * @param string|null                                     $pattern
-     * @param string|HttpMethod|list<string|HttpMethod>       $method     Accepts strings or HttpMethod enum (backward compat)
-     * @param list<class-string>                              $middleware
-     * @param array<string, string>                           $defaults
+     * Accepting HttpMethod keeps 4.0 attribute code working.
+     *
+     * @psalm-suppress DeprecatedClass
+     *
+     * @param string|HttpMethod|list<string|HttpMethod> $method
+     * @param list<string>                              $middleware definitions the dispatcher resolves, outermost first
+     * @param array<string, string>                     $defaults   values for parameters the path did not provide
      */
     public function __construct(
         public ?string $pattern = null,
@@ -50,13 +55,9 @@ final readonly class Route
         public ?string $host = null,
         public ?string $scheme = null,
     ) {
-        $raw = is_array($method) ? $method : [$method];
-
-        $this->methods = array_values(array_map(
-            static fn (string|HttpMethod $m): string => $m instanceof HttpMethod
-                ? strtoupper($m->value)
-                : strtoupper($m),
-            $raw,
-        ));
+        $this->methods = array_map(
+            static fn(string|HttpMethod $method): string => strtoupper($method instanceof HttpMethod ? $method->value : $method),
+            is_array($method) ? $method : [$method],
+        );
     }
 }

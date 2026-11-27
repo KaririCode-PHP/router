@@ -4,123 +4,146 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Core;
 
-use KaririCode\Router\Contract\Router;
+use Closure;
 use KaririCode\Router\Contract\RouteMatcher;
+use KaririCode\Router\Contract\Router;
 use KaririCode\Router\Exception\MethodNotAllowedException;
+use KaririCode\Router\Exception\RouteCompilationException;
 use KaririCode\Router\Exception\RouteNotFoundException;
 use KaririCode\Router\Matcher\CompositeRouteMatcher;
 
 /**
- * Central route registry and dispatcher.
+ * The application's routing table: routes are registered here during boot,
+ * through the fluent methods, groups, loaders or addRoute(), and matched
+ * here on every request. Matching is delegated to a RouteMatcher
+ * (CompositeRouteMatcher unless another is given, CachedMatcher for a
+ * cached table); the registry keeps the list, the names and the rules a
+ * route must satisfy to enter it.
  *
- * ARFA 1.3 principles applied:
- *  P1 — MatchResult is immutable
- *  P4 — Accepts raw strings, no PSR-7 coupling; any protocol can register routes
- *  P5 — Emits match events when EventDispatcherBridge is wired
+ * Preconditions: addRoute() rejects, with RouteCompilationException, a
+ * pattern that does not start with "/", a second route for a method and
+ * pattern already registered, and a second route with a name already
+ * taken: each would make one route unreachable or one name ambiguous. The
+ * fluent get() registers HEAD with GET (RFC 9110 §9.3.2). match() adds a
+ * missing leading "/" and matches the path as given, without decoding.
  *
- * Spec V4.0: final class. Implements the {@see Router} contract.
+ * Thread-safety: register during boot, then only match; the registry is
+ * not synchronised.
  *
- * Delegates matching to a pluggable {@see RouteMatcher} strategy
- * (defaults to {@see CompositeRouteMatcher} which combines a static
- * map for literal routes and a Radix-Tree for parameterized routes).
+ * Side effects: registration changes the registry and its matcher; match()
+ * changes nothing.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path component
+ * Example:
+ *
+ *     $router = new RouteRegistry();
+ *     $router->get('/users/{id:int}', [UserController::class, 'show'], 'users.show')
+ *         ->group('/admin', static function (RouteGroup $admin): void {
+ *             $admin->get('/stats', [AdminController::class, 'stats'], 'stats');
+ *         }, middleware: ['auth.admin'], namePrefix: 'admin.');
+ *
+ *     $router->match('GET', '/users/42')->parameters->get('id'); // '42'
+ *     $router->namedRoute('admin.stats')?->pattern;                // '/admin/stats'
+ *
+ * References: ADR-001, ADR-002; SPEC-001 §2; RFC 9110 §9.3.2 (HEAD).
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc9110#section-9.3.2
  */
 final class RouteRegistry implements Router
 {
-    /** @var array<string, RouteEntry> name → entry index */
-    private array $namedRoutes = [];
-
     /** @var list<RouteEntry> */
-    private array $allRoutes = [];
+    private array $routes = [];
+
+    /** @var array<string, RouteEntry> */
+    private array $named = [];
+
+    /** @var array<string, true> "METHOD pattern" of every registered route */
+    private array $claimed = [];
 
     public function __construct(
         private readonly RouteMatcher $matcher = new CompositeRouteMatcher(),
-    ) {
-    }
-
-    // ── Protocol-Agnostic Registration (ARFA 1.3 P4) ─────────────────────
+    ) {}
 
     /**
-     * Registers a route for arbitrary method strings (any protocol).
+     * Registers a route for method strings of any protocol.
      *
-     * @param list<string>                                    $methods    Uppercase method strings
-     * @param string|callable|array{0:class-string,1:string}  $handler
-     * @param list<string|class-string>                        $middleware
-     * @param array<string, string>                            $defaults
-     * @param array<string, mixed>                             $metadata
-      *
-      * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path component
+     * @param list<string>                               $methods
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     * @param array<string, string>                      $defaults
+     * @param array<string, mixed>                       $metadata
      */
     public function route(
         array $methods,
         string $pattern,
-        string|callable|array $handler,
+        string|array|Closure $handler,
         ?string $name = null,
         array $middleware = [],
         array $defaults = [],
         array $metadata = [],
     ): self {
-        $this->addRoute(new RouteEntry(
-            methods: $methods,
-            pattern: $pattern,
-            handler: $handler,
-            name: $name,
-            middleware: $middleware,
-            defaults: $defaults,
-            metadata: $metadata,
-        ));
+        $this->addRoute(new RouteEntry($methods, $pattern, $handler, $name, $middleware, $defaults, $metadata));
 
         return $this;
     }
 
-    // ── HTTP Fluent Shortcuts ────────────────────────────────────────────
-
     /**
-     * @param string|callable|array{0:class-string,1:string} $handler
-     * @param list<string|class-string>                       $middleware
-      *
-      * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path component
+     * Registers GET and HEAD.
+     *
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
      */
-    public function get(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    public function get(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
-        return $this->register(['GET', 'HEAD'], $pattern, $handler, $name, $middleware);
-    }
-
-    public function post(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
-    {
-        return $this->register(['POST'], $pattern, $handler, $name, $middleware);
-    }
-
-    public function put(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
-    {
-        return $this->register(['PUT'], $pattern, $handler, $name, $middleware);
-    }
-
-    public function patch(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
-    {
-        return $this->register(['PATCH'], $pattern, $handler, $name, $middleware);
-    }
-
-    public function delete(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
-    {
-        return $this->register(['DELETE'], $pattern, $handler, $name, $middleware);
+        return $this->route(['GET', 'HEAD'], $pattern, $handler, $name, $middleware);
     }
 
     /**
-     * @param list<string|class-string> $middleware
-      *
-      * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path component
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
      */
-    public function group(string $prefix, callable $callback, array $middleware = [], ?string $namePrefix = null): self
+    public function post(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
-        $group = new RouteGroup(
-            prefix: $prefix,
-            middleware: $middleware,
-            namePrefix: $namePrefix,
-        );
+        return $this->route(['POST'], $pattern, $handler, $name, $middleware);
+    }
 
-        $callback($group);
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function put(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
+    {
+        return $this->route(['PUT'], $pattern, $handler, $name, $middleware);
+    }
+
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function patch(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
+    {
+        return $this->route(['PATCH'], $pattern, $handler, $name, $middleware);
+    }
+
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function delete(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
+    {
+        return $this->route(['DELETE'], $pattern, $handler, $name, $middleware);
+    }
+
+    /**
+     * Registers the routes $define adds to a group that prefixes their
+     * patterns, prepends middleware and prefixes their names.
+     *
+     * @param callable(RouteGroup): void $define
+     * @param list<string>               $middleware
+     */
+    public function group(string $prefix, callable $define, array $middleware = [], ?string $namePrefix = null): self
+    {
+        $group = new RouteGroup($prefix, $middleware, $namePrefix);
+        $define($group);
 
         foreach ($group->resolve() as $route) {
             $this->addRoute($route);
@@ -130,62 +153,61 @@ final class RouteRegistry implements Router
     }
 
     /**
-     * @param list<string>              $methods
-     * @param list<string|class-string> $middleware
-      *
-      * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path component
+     * @throws RouteCompilationException when the pattern does not start with "/", or the route or its name is taken
      */
-    private function register(array $methods, string $pattern, string|callable|array $handler, ?string $name, array $middleware): self
-    {
-        $this->addRoute(new RouteEntry(
-            methods: $methods,
-            pattern: $pattern,
-            handler: $handler,
-            name: $name,
-            middleware: $middleware,
-        ));
-
-        return $this;
-    }
-
-    // ── Router Contract ──────────────────────────────────────────────────
-
+    #[\Override]
     public function addRoute(RouteEntry $route): void
     {
+        if (!str_starts_with($route->pattern, '/')) {
+            throw RouteCompilationException::invalidPattern($route->pattern, 'a registered pattern starts with "/"');
+        }
+
+        foreach ($route->methods as $method) {
+            if (isset($this->claimed[$method . ' ' . $route->pattern])) {
+                throw RouteCompilationException::duplicateRoute($method, $route->pattern);
+            }
+        }
+
+        if ($route->name !== null && isset($this->named[$route->name])) {
+            throw RouteCompilationException::duplicateRouteName($route->name);
+        }
+
         $this->matcher->add($route);
-        $this->allRoutes[] = $route;
+        $this->routes[] = $route;
+
+        foreach ($route->methods as $method) {
+            $this->claimed[$method . ' ' . $route->pattern] = true;
+        }
 
         if ($route->name !== null) {
-            $this->namedRoutes[$route->name] = $route;
+            $this->named[$route->name] = $route;
         }
     }
 
+    #[\Override]
     public function match(string $method, string $uri): MatchResult
     {
-        $uri = '/' . ltrim($uri, '/');
-        $result = $this->matcher->match($method, $uri);
+        $path = '/' . ltrim($uri, '/');
+        $result = $this->matcher->match($method, $path);
 
         if ($result !== null) {
             return $result;
         }
 
-        $allowed = $this->matcher->allowedMethods($uri);
-        if ($allowed !== []) {
-            throw new MethodNotAllowedException($method, $uri, $allowed);
-        }
+        $allowed = $this->matcher->allowedMethods($path);
 
-        throw new RouteNotFoundException($method, $uri);
+        throw $allowed === [] ? RouteNotFoundException::forRequest() : MethodNotAllowedException::allowing($allowed);
     }
 
-    /** @return list<RouteEntry> */
+    #[\Override]
     public function routes(): array
     {
-        return $this->allRoutes;
+        return $this->routes;
     }
 
+    /** The route registered under $name, or null: the find() form for URL generation. */
     public function namedRoute(string $name): ?RouteEntry
     {
-        return $this->namedRoutes[$name] ?? null;
+        return $this->named[$name] ?? null;
     }
 }
-

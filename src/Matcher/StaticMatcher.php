@@ -9,40 +9,43 @@ use KaririCode\Router\Core\MatchResult;
 use KaririCode\Router\Core\RouteEntry;
 
 /**
- * Hash-map matcher for static (parameterless) routes.
+ * The first tier of CompositeRouteMatcher: routes without placeholders, in
+ * a hash map from path to method to route, so a literal path such as
+ * /health resolves with one array lookup however many routes exist.
  *
- * ARFA 1.3 P2 (Reactive Flow Composition): first stage of the
- * composite matcher pipeline — O(1) hash lookup before regex fallback.
- * Spec V4.0: final class.
+ * Preconditions: add() ignores routes whose pattern has placeholders;
+ * RegexMatcher serves those. When two routes claim the same method and
+ * path, the first one registered keeps it, as in RegexMatcher; the
+ * registry rejects such a second route before it gets here.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path matching
+ * Thread-safety: written during boot, read afterwards.
  *
- * Achieves O(1) lookup for literal paths, which typically account
- * for 60–80% of routes in real-world applications. The Composite
- * matcher delegates here first before falling back to the Radix Tree.
+ * Side effects: add() changes the map.
  *
- * Storage layout:  uri → method → RouteEntry
+ * Example:
+ *
+ *     $matcher = new StaticMatcher();
+ *     $matcher->add(new RouteEntry(['GET', 'HEAD'], '/health', 'HealthCheck'));
+ *     $matcher->match('HEAD', '/health')?->handler(); // 'HealthCheck'
+ *
+ * References: ADR-001 (composite matching); SPEC-001 §5.1.
+ *
+ * @see https://www.php.net/manual/en/language.types.array.php
  */
 final class StaticMatcher implements RouteMatcher
 {
-    /** @var array<string, array<string, RouteEntry>> */
-    private array $map = [];
+    /** @var array<string, array<string, RouteEntry>> path to uppercase method to route */
+    private array $routes = [];
 
+    #[\Override]
     public function match(string $method, string $uri): ?MatchResult
     {
-        $entry = $this->map[$uri][strtoupper($method)] ?? null;
+        $route = $this->routes[$uri][strtoupper($method)] ?? null;
 
-        if ($entry === null) {
-            return null;
-        }
-
-        return new MatchResult(
-            route: $entry,
-            rawParameters: [],
-            middleware: $entry->middleware,
-        );
+        return $route === null ? null : new MatchResult($route, $route->defaults, $route->middleware);
     }
 
+    #[\Override]
     public function add(RouteEntry $route): void
     {
         if (!$route->compiledPattern->isStatic) {
@@ -50,29 +53,23 @@ final class StaticMatcher implements RouteMatcher
         }
 
         foreach ($route->methods as $method) {
-            $this->map[$route->pattern][$method] = $route;
+            $this->routes[$route->pattern][$method] ??= $route;
         }
     }
 
+    #[\Override]
     public function allowedMethods(string $uri): array
     {
-        if (!isset($this->map[$uri])) {
-            return [];
-        }
-
-        return array_keys($this->map[$uri]);
+        return array_keys($this->routes[$uri] ?? []);
     }
 
     /**
-     * Export the static route map for cache serialization.
-     *
-     * Format: [uri => [method => RouteEntry]].
-     * Used by {@see \KaririCode\Router\Matcher\CachedMatcher::warm()}.
+     * The map, for CachedMatcher to write out.
      *
      * @return array<string, array<string, RouteEntry>>
      */
     public function exportMap(): array
     {
-        return $this->map;
+        return $this->routes;
     }
 }

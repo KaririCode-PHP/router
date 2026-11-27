@@ -4,25 +4,38 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Core;
 
+use Closure;
 use KaririCode\Router\ValueObject\RouteParameters;
 
 /**
- * Immutable result of a successful route match (ARFA 1.3 P1).
+ * What a successful match hands the dispatcher: the route, the parameters
+ * taken from the path with the route's defaults, and the middleware to run
+ * around the handler, outermost first.
  *
- * Spec V4.0: final readonly class with promoted constructor properties.
+ * Preconditions: built by a matcher; $middleware is the route's own list,
+ * group middleware already prepended when the route was registered.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path parameters
+ * Thread-safety: immutable.
  *
- * Contains everything the dispatcher needs: the matched route entry,
- * extracted URI parameters, and the fully resolved middleware stack.
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     $result = $router->match('GET', '/users/42');
+ *     $handler = $resolver->resolve($result->handler());
+ *     $response = $pipeline->execute($middleware, $handler, ['id' => $result->parameters->getInt('id')]);
+ *
+ * References: SPEC-001 §4 (match result); ADR-001.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc3986#section-3.3
  */
 final readonly class MatchResult
 {
     public RouteParameters $parameters;
 
     /**
-     * @param array<string, string>     $rawParameters
-     * @param list<string|class-string> $middleware     Merged group + route middleware
+     * @param array<string, string> $rawParameters
+     * @param list<string>          $middleware
      */
     public function __construct(
         public RouteEntry $route,
@@ -32,7 +45,10 @@ final readonly class MatchResult
         $this->parameters = new RouteParameters($rawParameters);
     }
 
-    public function handler(): string|callable|array
+    /**
+     * @return string|array{0: string, 1: string}|Closure
+     */
+    public function handler(): string|array|Closure
     {
         return $this->route->handler;
     }

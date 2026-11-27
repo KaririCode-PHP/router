@@ -4,22 +4,36 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Core;
 
+use Closure;
+
 /**
- * Fluent API for defining route groups with shared attributes.
+ * Collects routes that share a path prefix, middleware and a name prefix,
+ * during RouteRegistry::group(). Groups nest: an inner group's routes get
+ * the inner attributes first, then the outer ones, so a route named
+ * 'stats' in group 'admin.' inside group 'api.' is 'api.admin.stats'.
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): methods are raw uppercase
- * strings — HTTP shortcuts
- * (get/post/put/patch/delete/options/any) are convenience wrappers
- * around map(), which accepts any protocol's method strings.
+ * Preconditions: patterns inside a group are relative to its prefix and
+ * usually start with "/"; an empty pattern stands for the prefix itself. A
+ * trailing "/" of the prefix is dropped when joining.
  *
- * Spec V4.0: final class. Not readonly because it accumulates
- * entries during the registration phase (builder pattern).
+ * Thread-safety: a builder, used once during boot.
  *
- * Groups can nest: inner groups inherit and prepend the outer
- * group's prefix, middleware, name prefix, host, and scheme
- * constraints.
+ * Side effects: the fluent methods add entries to the group.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3 URI component grouping
+ * Example:
+ *
+ *     $router->group('/api/v1', static function (RouteGroup $api): void {
+ *         $api->get('/users', 'users.index', 'users.index')
+ *             ->group('/admin', static function (RouteGroup $admin): void {
+ *                 $admin->get('/stats', 'admin.stats', 'stats');
+ *             }, middleware: ['auth.admin'], namePrefix: 'admin.');
+ *     }, middleware: ['auth.api'], namePrefix: 'api.');
+ *     // GET /api/v1/admin/stats, named api.admin.stats, middleware auth.api then auth.admin
+ *
+ * References: SPEC-001 §2.3 (groups); code review BUG-004, which turned
+ * out to be a test that named its route 'admin.stats' inside 'admin.'.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc3986#section-3.3
  */
 final class RouteGroup
 {
@@ -27,108 +41,123 @@ final class RouteGroup
     private array $entries = [];
 
     /**
-     * @param list<string|class-string> $middleware
+     * @param list<string> $middleware
      */
     public function __construct(
         private readonly string $prefix = '',
         private readonly array $middleware = [],
         private readonly ?string $namePrefix = null,
-        private readonly ?string $host = null,
-        private readonly ?string $scheme = null,
-    ) {
-    }
-
-    // ── HTTP Verb Shortcuts ──────────────────────────────────────────────
+    ) {}
 
     /**
-     * @param string|callable|array{0:class-string,1:string} $handler
-     * @param list<string|class-string>                       $middleware
+     * Adds GET and HEAD.
+     *
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
      */
-    public function get(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    public function get(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
         return $this->map(['GET', 'HEAD'], $pattern, $handler, $name, $middleware);
     }
 
-    public function post(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function post(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
         return $this->map(['POST'], $pattern, $handler, $name, $middleware);
     }
 
-    public function put(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function put(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
         return $this->map(['PUT'], $pattern, $handler, $name, $middleware);
     }
 
-    public function patch(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function patch(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
         return $this->map(['PATCH'], $pattern, $handler, $name, $middleware);
     }
 
-    public function delete(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function delete(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
         return $this->map(['DELETE'], $pattern, $handler, $name, $middleware);
     }
 
-    public function options(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    /**
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     */
+    public function options(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
         return $this->map(['OPTIONS'], $pattern, $handler, $name, $middleware);
     }
 
     /**
-     * Register a route for all standard HTTP methods.
+     * Adds the seven methods of HttpMethod.
+     *
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
      */
-    public function any(string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
+    public function any(string $pattern, string|array|Closure $handler, ?string $name = null, array $middleware = []): self
     {
-        return $this->map(
-            ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-            $pattern,
-            $handler,
-            $name,
-            $middleware,
-        );
+        return $this->map(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], $pattern, $handler, $name, $middleware);
     }
 
     /**
-     * @param list<string>              $methods    Uppercase method strings (any protocol)
-     * @param list<string|class-string> $middleware
+     * Adds a route for method strings of any protocol; the same fields as
+     * RouteRegistry::route().
+     *
+     * @param list<string>                               $methods
+     * @param string|array{0: string, 1: string}|Closure $handler
+     * @param list<string>                               $middleware
+     * @param array<string, string>                      $defaults
+     * @param array<string, mixed>                       $metadata
      */
-    public function map(array $methods, string $pattern, string|callable|array $handler, ?string $name = null, array $middleware = []): self
-    {
-        $this->entries[] = new RouteEntry(
-            methods: $methods,
-            pattern: $pattern,
-            handler: $handler,
-            name: $name,
-            middleware: $middleware,
-        );
+    public function map(
+        array $methods,
+        string $pattern,
+        string|array|Closure $handler,
+        ?string $name = null,
+        array $middleware = [],
+        array $defaults = [],
+        array $metadata = [],
+    ): self {
+        $this->entries[] = new RouteEntry($methods, $pattern, $handler, $name, $middleware, $defaults, $metadata);
 
         return $this;
     }
 
-    // ── Nesting ──────────────────────────────────────────────────────────
-
     /**
-     * @param list<string|class-string> $middleware
+     * Adds a nested group.
+     *
+     * @param callable(self): void $define
+     * @param list<string>         $middleware
      */
-    public function group(string $prefix, callable $callback, array $middleware = [], ?string $namePrefix = null): self
+    public function group(string $prefix, callable $define, array $middleware = [], ?string $namePrefix = null): self
     {
-        $child = new self(
-            prefix: $prefix,
-            middleware: $middleware,
-            namePrefix: $namePrefix,
-        );
-
-        $callback($child);
+        $child = new self($prefix, $middleware, $namePrefix);
+        $define($child);
         $this->entries[] = $child;
 
         return $this;
     }
 
-    // ── Resolution ───────────────────────────────────────────────────────
-
     /**
-     * Flatten this group (and nested groups) into concrete RouteEntry
-     * instances with fully resolved prefixes, middleware, and names.
+     * The group's routes with every prefix and middleware applied, nested
+     * groups included, in the order they were added.
      *
      * @return list<RouteEntry>
      */
@@ -137,35 +166,18 @@ final class RouteGroup
         $routes = [];
 
         foreach ($this->entries as $entry) {
-            if ($entry instanceof self) {
-                foreach ($entry->resolve() as $nested) {
-                    $routes[] = $this->applyGroupAttributes($nested);
-                }
-            } else {
-                $routes[] = $this->applyGroupAttributes($entry);
+            foreach ($entry instanceof self ? $entry->resolve() : [$entry] as $route) {
+                $routes[] = $this->apply($route);
             }
         }
 
         return $routes;
     }
 
-    private function applyGroupAttributes(RouteEntry $route): RouteEntry
+    private function apply(RouteEntry $route): RouteEntry
     {
-        $name = $route->name;
-        if ($name !== null && $this->namePrefix !== null) {
-            $name = $this->namePrefix . $name;
-        }
+        $route = $route->withPrefix($this->prefix)->withPrependedMiddleware($this->middleware);
 
-        return new RouteEntry(
-            methods: $route->methods,
-            pattern: rtrim($this->prefix, '/') . $route->pattern,
-            handler: $route->handler,
-            name: $name,
-            middleware: [...$this->middleware, ...$route->middleware],
-            defaults: $route->defaults,
-            metadata: $route->metadata,
-            host: $route->host ?? $this->host,
-            scheme: $route->scheme ?? $this->scheme,
-        );
+        return $this->namePrefix === null ? $route : $route->withNamePrefix($this->namePrefix);
     }
 }

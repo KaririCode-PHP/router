@@ -4,14 +4,31 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Contract;
 
+use KaririCode\Router\Exception\RouteNotFoundException;
+use KaririCode\Router\Exception\UrlGenerationException;
+
 /**
- * Generates URIs from named routes and parameter maps.
+ * Builds the path of a named route from parameter values: reverse routing,
+ * so links follow the route definitions instead of repeating them.
  *
- * ARFA 1.3 P1 (Immutable State Transformation): generate() is a
- * pure function — same inputs always produce the same URI string.
- * Spec V4.0 §1.3: interface without "Interface" suffix.
+ * Preconditions: every placeholder needs a value or a route default, and
+ * every value must fit the placeholder's type. Values are percent-encoded
+ * per path segment; parameters that are not placeholders join the query
+ * string, as do the entries of $query.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-5.3 URI reference resolution
+ * Thread-safety: generation reads the routes and keeps no state.
+ *
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     $generator->generate('users.show', ['id' => 42]);               // '/users/42'
+ *     $generator->generate('users.show', ['id' => 42], ['tab' => 'x']); // '/users/42?tab=x'
+ *
+ * References: RFC 3986 §2.1 (percent-encoding) and §5.3 (recomposition);
+ * SPEC-001 §6.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc3986#section-5.3
  */
 interface UrlGenerator
 {
@@ -19,7 +36,8 @@ interface UrlGenerator
      * @param array<string, string|int> $parameters
      * @param array<string, string>     $query
      *
-     * @throws \KaririCode\Router\Exception\UrlGenerationException
+     * @throws RouteNotFoundException when no route has the name
+     * @throws UrlGenerationException when a value is missing or breaks its type
      */
     public function generate(string $routeName, array $parameters = [], array $query = []): string;
 }

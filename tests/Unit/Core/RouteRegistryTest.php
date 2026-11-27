@@ -5,278 +5,184 @@ declare(strict_types=1);
 namespace KaririCode\Router\Tests\Unit\Core;
 
 use KaririCode\Router\Core\RouteEntry;
+use KaririCode\Router\Core\RouteGroup;
 use KaririCode\Router\Core\RouteRegistry;
 use KaririCode\Router\Exception\MethodNotAllowedException;
+use KaririCode\Router\Exception\RouteCompilationException;
 use KaririCode\Router\Exception\RouteNotFoundException;
+use KaririCode\Router\Exception\RouterCode;
+use KaririCode\Router\Matcher\StaticMatcher;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(RouteRegistry::class)]
 final class RouteRegistryTest extends TestCase
 {
-    private RouteRegistry $registry;
-
-    protected function setUp(): void
+    #[Test]
+    public function fluentMethodsRegisterTheirMethods(): void
     {
-        $this->registry = new RouteRegistry();
+        $router = (new RouteRegistry())
+            ->get('/a', 'get', 'a')
+            ->post('/b', 'post')
+            ->put('/c', 'put')
+            ->patch('/d', 'patch')
+            ->delete('/e', 'delete', null, ['auth']);
+
+        self::assertSame(
+            [['GET', 'HEAD'], ['POST'], ['PUT'], ['PATCH'], ['DELETE']],
+            array_map(static fn(RouteEntry $route): array => $route->methods, $router->routes()),
+        );
+        self::assertSame('get', $router->match('HEAD', '/a')->handler());
+        self::assertSame('a', $router->match('GET', '/a')->routeName());
+        self::assertSame('put', $router->match('PUT', '/c')->handler());
+        self::assertSame('patch', $router->match('PATCH', '/d')->handler());
+        self::assertSame(['auth'], $router->match('DELETE', '/e')->middleware);
     }
 
-    // ── Basic Matching ───────────────────────────────────────────────────
-
-    public function testMatchStaticRoute(): void
+    #[Test]
+    public function routeAcceptsMethodsOfAnyProtocolWithDefaultsAndMetadata(): void
     {
-        $this->registry->get('/users', 'UserController::index', 'users.index');
-        $result = $this->registry->match('GET', '/users');
+        $router = (new RouteRegistry())->route(['unary'], '/greeter/{name}', 'Greeter', 'greet', ['auth'], ['lang' => 'en'], ['rpc' => true]);
+        $result = $router->match('UNARY', '/greeter/ana');
 
-        self::assertSame('users.index', $result->routeName());
-        self::assertSame('UserController::index', $result->handler());
-        self::assertCount(0, $result->parameters);
+        self::assertSame('Greeter', $result->handler());
+        self::assertSame(['lang' => 'en', 'name' => 'ana'], $result->parameters->all());
+        self::assertSame(['rpc' => true], $result->route->metadata);
+        self::assertSame(['auth'], $result->middleware);
+        self::assertSame($result->route, $router->namedRoute('greet'));
     }
 
-    public function testMatchParameterizedRoute(): void
+    #[Test]
+    public function matchAddsTheLeadingSlash(): void
     {
-        $this->registry->get('/users/{id:int}', 'UserController::show', 'users.show');
-        $result = $this->registry->match('GET', '/users/42');
+        $router = (new RouteRegistry())->get('/users/{id:int}', 'h');
 
-        self::assertSame('42', $result->parameters->get('id'));
-        self::assertSame('users.show', $result->routeName());
+        self::assertSame('42', $router->match('get', 'users/42')->parameters->get('id'));
     }
 
-    public function testMatchMultipleParameters(): void
+    #[Test]
+    public function aMissIsNotFoundWhenNoRouteHasThePath(): void
     {
-        $this->registry->get('/posts/{year:int}/{slug:slug}', 'PostController::show');
-        $result = $this->registry->match('GET', '/posts/2025/hello-world');
-
-        self::assertSame('2025', $result->parameters->get('year'));
-        self::assertSame('hello-world', $result->parameters->get('slug'));
-    }
-
-    // ── HTTP Methods ─────────────────────────────────────────────────────
-
-    public function testPostRoute(): void
-    {
-        $this->registry->post('/users', 'UserController::store');
-        $result = $this->registry->match('POST', '/users');
-        self::assertSame('UserController::store', $result->handler());
-    }
-
-    public function testPutRoute(): void
-    {
-        $this->registry->put('/users/{id:int}', 'UserController::update');
-        $result = $this->registry->match('PUT', '/users/1');
-        self::assertSame('1', $result->parameters->get('id'));
-    }
-
-    public function testDeleteRoute(): void
-    {
-        $this->registry->delete('/users/{id:int}', 'UserController::destroy');
-        $result = $this->registry->match('DELETE', '/users/1');
-        self::assertNotNull($result);
-    }
-
-    public function testPatchRoute(): void
-    {
-        $this->registry->patch('/users/{id:int}', 'UserController::patch');
-        $result = $this->registry->match('PATCH', '/users/1');
-        self::assertNotNull($result);
-    }
-
-    // ── HEAD auto-registration with GET ──────────────────────────────────
-
-    public function testGetAlsoRegistersHead(): void
-    {
-        $this->registry->get('/health', 'HealthController::check');
-        $result = $this->registry->match('HEAD', '/health');
-        self::assertNotNull($result);
-    }
-
-    // ── 404 Not Found ────────────────────────────────────────────────────
-
-    public function testRouteNotFound(): void
-    {
-        $this->registry->get('/users', 'handler');
-
-        $this->expectException(RouteNotFoundException::class);
-        $this->registry->match('GET', '/nonexistent');
-    }
-
-    // ── 405 Method Not Allowed ───────────────────────────────────────────
-
-    public function testMethodNotAllowed(): void
-    {
-        $this->registry->get('/users', 'handler');
+        $router = (new RouteRegistry())->get('/users', 'h');
 
         try {
-            $this->registry->match('DELETE', '/users');
-            self::fail('Expected MethodNotAllowedException');
-        } catch (MethodNotAllowedException $e) {
-            self::assertContains('GET', $e->allowedMethods);
-            self::assertContains('HEAD', $e->allowedMethods);
+            $router->match('GET', '/missing/thing');
+            self::fail('RouteNotFoundException expected');
+        } catch (RouteNotFoundException $e) {
+            self::assertSame(RouterCode::RouteNotFound, $e->errorCode);
+            self::assertStringNotContainsString('missing', $e->getMessage());
         }
     }
 
-    // ── Route Groups ─────────────────────────────────────────────────────
-
-    public function testGroupPrefix(): void
+    #[Test]
+    public function aMissIsMethodNotAllowedWhenThePathExistsForOtherMethods(): void
     {
-        $this->registry->group('/api/v1', function ($group): void {
-            $group->get('/users', 'UserController::index', 'users.index');
-            $group->post('/users', 'UserController::store', 'users.store');
-        });
-
-        $result = $this->registry->match('GET', '/api/v1/users');
-        self::assertSame('users.index', $result->routeName());
-
-        $result = $this->registry->match('POST', '/api/v1/users');
-        self::assertSame('users.store', $result->routeName());
-    }
-
-    public function testNestedGroups(): void
-    {
-        $this->registry->group('/api', function ($api): void {
-            $api->group('/v1', function ($v1): void {
-                $v1->get('/users', 'handler', 'api.v1.users');
-            });
-        });
-
-        $result = $this->registry->match('GET', '/api/v1/users');
-        self::assertSame('api.v1.users', $result->routeName());
-    }
-
-    public function testGroupMiddleware(): void
-    {
-        $this->registry->group('/admin', function ($group): void {
-            $group->get('/dashboard', 'AdminController::dashboard', 'admin.dashboard');
-        }, middleware: ['AuthMiddleware']);
-
-        $result = $this->registry->match('GET', '/admin/dashboard');
-        self::assertContains('AuthMiddleware', $result->middleware);
-    }
-
-    public function testGroupNamePrefix(): void
-    {
-        $this->registry->group('/admin', function ($group): void {
-            $group->get('/dashboard', 'handler', 'dashboard');
-        }, namePrefix: 'admin.');
-
-        $result = $this->registry->match('GET', '/admin/dashboard');
-        self::assertSame('admin.dashboard', $result->routeName());
-    }
-
-    // ── Named Routes ─────────────────────────────────────────────────────
-
-    public function testNamedRouteLookup(): void
-    {
-        $this->registry->get('/users', 'handler', 'users.index');
-        $route = $this->registry->namedRoute('users.index');
-        self::assertNotNull($route);
-        self::assertSame('/users', $route->pattern);
-    }
-
-    public function testUnknownNamedRouteReturnsNull(): void
-    {
-        self::assertNull($this->registry->namedRoute('nonexistent'));
-    }
-
-    // ── Route Listing ────────────────────────────────────────────────────
-
-    public function testRoutesReturnsAllRegistered(): void
-    {
-        $this->registry->get('/a', 'handler1');
-        $this->registry->post('/b', 'handler2');
-        $this->registry->put('/c/{id:int}', 'handler3');
-
-        self::assertCount(3, $this->registry->routes());
-    }
-
-    // ── URI Normalization ────────────────────────────────────────────────
-
-    public function testLeadingSlashNormalized(): void
-    {
-        $this->registry->get('/users', 'handler');
-        $result = $this->registry->match('GET', 'users');
-        self::assertNotNull($result);
-    }
-
-    // ── Constraint Rejection ─────────────────────────────────────────────
-
-    public function testIntConstraintRejectsNonNumeric(): void
-    {
-        $this->registry->get('/users/{id:int}', 'handler');
-
-        $this->expectException(RouteNotFoundException::class);
-        $this->registry->match('GET', '/users/abc');
-    }
-
-    public function testUuidConstraintRejectsInvalid(): void
-    {
-        $this->registry->get('/items/{uuid:uuid}', 'handler');
-
-        $this->expectException(RouteNotFoundException::class);
-        $this->registry->match('GET', '/items/not-a-uuid');
-    }
-
-    // ── Protocol-Agnostic Registration (ARFA 1.3 P4) ─────────────────────
-
-    public function testRouteMethodAcceptsArbitraryStrings(): void
-    {
-        $this->registry->route(['UNARY'], '/user.UserService/GetUser', 'UserService::getUser', 'grpc.user.get');
-
-        $result = $this->registry->match('UNARY', '/user.UserService/GetUser');
-        self::assertSame('grpc.user.get', $result->routeName());
-    }
-
-    public function testRouteMethodWithParameterizedGrpcPath(): void
-    {
-        $this->registry->route(['UNARY'], '/user.UserService/GetUser/{id:int}', 'UserService::getUser', 'grpc.user.get');
-
-        $result = $this->registry->match('UNARY', '/user.UserService/GetUser/42');
-        self::assertSame('42', $result->parameters->get('id'));
-    }
-
-    public function testWebSocketEventRegistration(): void
-    {
-        $this->registry->route(['SUBSCRIBE'], '/channels/notifications', 'NotificationHandler::handle');
-
-        $result = $this->registry->match('SUBSCRIBE', '/channels/notifications');
-        self::assertSame('NotificationHandler::handle', $result->handler());
-    }
-
-    public function testCliCommandRegistration(): void
-    {
-        $this->registry->route(['RUN'], '/migrate/up', 'MigrateCommand::execute', 'cli.migrate');
-
-        $result = $this->registry->match('RUN', '/migrate/up');
-        self::assertSame('cli.migrate', $result->routeName());
-    }
-
-    public function testMultiProtocolMethodsOnSamePath(): void
-    {
-        $this->registry->route(['QUERY'], '/graphql/users', 'UserResolver::query', 'gql.users.query');
-        $this->registry->route(['MUTATION'], '/graphql/users', 'UserResolver::mutate', 'gql.users.mutation');
-
-        $query = $this->registry->match('QUERY', '/graphql/users');
-        self::assertSame('gql.users.query', $query->routeName());
-
-        $mutation = $this->registry->match('MUTATION', '/graphql/users');
-        self::assertSame('gql.users.mutation', $mutation->routeName());
-    }
-
-    public function testRouteMethodNormalizesToUppercase(): void
-    {
-        $this->registry->route(['unary'], '/service/method', 'handler', 'test');
-
-        $result = $this->registry->match('UNARY', '/service/method');
-        self::assertSame('test', $result->routeName());
-    }
-
-    public function testMethodNotAllowedForCustomProtocol(): void
-    {
-        $this->registry->route(['QUERY'], '/graphql/users', 'handler');
+        $router = (new RouteRegistry())->get('/users/{id:int}', 'show')->post('/users/{id:int}', 'update');
 
         try {
-            $this->registry->match('MUTATION', '/graphql/users');
-            self::fail('Expected MethodNotAllowedException');
+            $router->match('DELETE', '/users/7');
+            self::fail('MethodNotAllowedException expected');
         } catch (MethodNotAllowedException $e) {
-            self::assertContains('QUERY', $e->allowedMethods);
+            self::assertSame(['GET', 'HEAD', 'POST'], $e->allowedMethods);
         }
+    }
+
+    #[Test]
+    public function groupsRegisterTheirResolvedRoutes(): void
+    {
+        $router = (new RouteRegistry())->group('/admin', static function (RouteGroup $group): void {
+            $group->get('/stats', 'stats', 'stats', ['etag']);
+        }, ['auth'], 'admin.');
+
+        $result = $router->match('GET', '/admin/stats');
+
+        self::assertSame('admin.stats', $result->routeName());
+        self::assertSame(['auth', 'etag'], $result->middleware);
+        self::assertSame('/admin/stats', $router->namedRoute('admin.stats')?->pattern);
+    }
+
+    #[Test]
+    public function routesAndNamesAreKeptInRegistrationOrder(): void
+    {
+        $router = (new RouteRegistry())->get('/b', 'b', 'b')->get('/a', 'a');
+
+        self::assertSame(['/b', '/a'], array_map(static fn(RouteEntry $route): string => $route->pattern, $router->routes()));
+        self::assertNull($router->namedRoute('a'));
+        self::assertSame('/b', $router->namedRoute('b')?->pattern);
+    }
+
+    #[Test]
+    public function aRegisteredPatternMustStartWithASlash(): void
+    {
+        $this->expectException(RouteCompilationException::class);
+        $this->expectExceptionCode(RouterCode::InvalidPattern->value);
+
+        (new RouteRegistry())->get('users', 'h');
+    }
+
+    #[Test]
+    public function aSecondRouteForTheSameMethodAndPatternIsRejected(): void
+    {
+        $router = (new RouteRegistry())->get('/users/{id}', 'show');
+
+        try {
+            $router->route(['HEAD'], '/users/{id}', 'other');
+            self::fail('RouteCompilationException expected');
+        } catch (RouteCompilationException $e) {
+            self::assertSame(RouterCode::DuplicateRoute, $e->errorCode);
+            self::assertStringContainsString('HEAD "/users/{id}"', $e->getMessage());
+        }
+
+        $router->post('/users/{id}', 'update');
+        self::assertCount(2, $router->routes(), 'another method on the same pattern is fine');
+    }
+
+    #[Test]
+    public function aRejectedRouteLeavesTheRegistryUnchanged(): void
+    {
+        $router = (new RouteRegistry())->get('/a', 'a', 'name');
+
+        try {
+            $router->get('/b', 'b', 'name');
+        } catch (RouteCompilationException $e) {
+            self::assertSame(RouterCode::DuplicateRouteName, $e->errorCode);
+        }
+
+        try {
+            $router->route(['POST', 'GET'], '/a', 'again');
+        } catch (RouteCompilationException $e) {
+            self::assertSame(RouterCode::DuplicateRoute, $e->errorCode);
+        }
+
+        self::assertCount(1, $router->routes());
+        self::assertSame('a', $router->namedRoute('name')?->handler);
+
+        $this->expectException(RouteNotFoundException::class);
+        $router->match('GET', '/b');
+    }
+
+    #[Test]
+    public function aRouteRejectedForItsMethodsDoesNotClaimTheOthers(): void
+    {
+        $router = (new RouteRegistry())->get('/a', 'a');
+
+        try {
+            $router->route(['POST', 'GET'], '/a', 'again');
+        } catch (RouteCompilationException) {
+        }
+
+        $router->post('/a', 'post');
+        self::assertSame('post', $router->match('POST', '/a')->handler());
+    }
+
+    #[Test]
+    public function aCustomMatcherReceivesTheRoutes(): void
+    {
+        $matcher = new StaticMatcher();
+        $router = new RouteRegistry($matcher);
+        $router->get('/health', 'HealthCheck');
+
+        self::assertSame('HealthCheck', $matcher->match('GET', '/health')?->handler());
     }
 }

@@ -5,19 +5,28 @@ declare(strict_types=1);
 namespace KaririCode\Router\Enum;
 
 /**
- * HTTP request methods as defined in RFC 9110 §9.
+ * The seven HTTP methods of RFC 9110 §9 that #[Route] accepted before the
+ * router took plain method strings. It stays for attribute code written
+ * against 4.0; new code passes strings, which any protocol can use (gRPC
+ * UNARY, WebSocket SUBSCRIBE, CLI RUN).
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): prefer raw uppercase strings
- * ('GET', 'POST') for protocol-agnostic routing.
+ * Preconditions: backed by the uppercase method name, the form RouteEntry
+ * stores; the router never converts a method string back to this enum.
  *
- * Spec V4.0: pure enum, backed by string for wire-format compatibility.
+ * Thread-safety: enum cases are immutable.
  *
- * @deprecated Since V4.1. Use raw uppercase strings directly with
- *             RouteEntry and RouteRegistry::route(). This enum is
- *             retained for backward compatibility with attribute-based
- *             routing (#[Route(method: HttpMethod::Get)]).
+ * Side effects: none.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc7231#section-4
+ * Example:
+ *
+ *     #[Route('/users', method: HttpMethod::Post)] // same route as method: 'POST'
+ *
+ * References: RFC 9110 §9 (methods) and §9.2 (safe and idempotent methods);
+ * ADR-002 (protocol-agnostic design).
+ *
+ * @deprecated since 4.1: pass method strings ('GET', 'POST'); removed in 5.0.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc9110#section-9
  */
 enum HttpMethod: string
 {
@@ -29,20 +38,7 @@ enum HttpMethod: string
     case Head = 'HEAD';
     case Options = 'OPTIONS';
 
-    // ── Factory ──────────────────────────────────────────────────────────
-
-    public static function fromString(string $method): self
-    {
-        return self::from(strtoupper(trim($method)));
-    }
-
-    // ── Wire Format ──────────────────────────────────────────────────────
-
-    public function label(): string
-    {
-        return $this->value;
-    }
-
+    /** RFC 9110 §9.2.1: the method is essentially read-only. */
     public function isSafe(): bool
     {
         return match ($this) {
@@ -51,12 +47,12 @@ enum HttpMethod: string
         };
     }
 
+    /** RFC 9110 §9.2.2: repeating the request has the effect of sending it once. */
     public function isIdempotent(): bool
     {
         return match ($this) {
-            self::Get, self::Head, self::Options,
-            self::Put, self::Delete => true,
-            default => false,
+            self::Post, self::Patch => false,
+            default => true,
         };
     }
 }

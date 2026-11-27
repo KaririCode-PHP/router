@@ -4,48 +4,53 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Exception;
 
+use KaririCode\Exception\NotFoundException;
+
 /**
- * The requested method is not registered for the matched URI.
+ * The request path exists, but no route on it accepts the request method
+ * (5011). It carries the methods the path does accept, which an HTTP edge
+ * sends in the Allow header of its 405 response. It stays in the NotFound
+ * family: an edge that does not know this class answers 404, which is
+ * still true for that method.
  *
- * ARFA 1.3 P2: carries the allowed methods list so the HTTP layer
- * can produce a 405 with the RFC 9110 §8.5.1 Allow header.
- * Spec V4.0: final class with static factory.
+ * Preconditions: allowedMethods is never empty; the matcher raises
+ * RouteNotFoundException when no route has the path at all. The message
+ * lists the accepted methods, which come from the route definitions, and
+ * never the method the client sent (errata E-047).
  *
- * @see https://datatracker.ietf.org/doc/html/rfc7231#section-6.5.5 HTTP 405 Method Not Allowed
+ * Thread-safety: an exception belongs to the call that threw it.
+ *
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     try {
+ *         $result = $router->match('DELETE', '/users');
+ *     } catch (MethodNotAllowedException $e) {
+ *         return $responses->methodNotAllowed(allow: implode(', ', $e->allowedMethods));
+ *     }
+ *
+ * References: KaririCode Spec V4.3.3 §8.4; RFC 9110 §15.5.6 (405) and
+ * §10.2.1 (Allow); ADR-007.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc9110#section-15.5.6
  */
-final class MethodNotAllowedException extends RouterException
+final class MethodNotAllowedException extends NotFoundException
 {
-    /** @var list<string> */
-    public readonly array $allowedMethods;
+    /** @var list<string> uppercase methods the path accepts, in registration order */
+    public private(set) array $allowedMethods = [];
 
     /**
-     * @param list<string> $allowedMethods
-      *
-      * @see https://datatracker.ietf.org/doc/html/rfc7231#section-6.5.5 HTTP 405 Method Not Allowed
+     * @param non-empty-list<string> $allowedMethods
      */
-    public static function create(string $method, string $uri, array $allowedMethods): self
+    public static function allowing(array $allowedMethods): self
     {
-        return new self($method, $uri, $allowedMethods);
-    }
-
-    /**
-     * @param list<string> $allowedMethods
-      *
-      * @see https://datatracker.ietf.org/doc/html/rfc7231#section-6.5.5 HTTP 405 Method Not Allowed
-     */
-    public function __construct(
-        string $method,
-        string $uri,
-        array $allowedMethods,
-        ?\Throwable $previous = null,
-    ) {
-        $this->allowedMethods = $allowedMethods;
-        $allowed = implode(', ', $allowedMethods);
-        parent::__construct(
-            "{$method} not allowed for {$uri}. Allowed: {$allowed}",
-            5111,
-            $previous,
+        $failure = new self(
+            RouterCode::MethodNotAllowed,
+            sprintf('The request path does not accept the request method; it accepts %s.', implode(', ', $allowedMethods)),
         );
+        $failure->allowedMethods = $allowedMethods;
+
+        return $failure;
     }
 }
-

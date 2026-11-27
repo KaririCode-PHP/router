@@ -4,26 +4,40 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Attribute;
 
+use Attribute;
+
 /**
- * Declares class-level routing defaults for a controller.
+ * Class-level defaults for the #[Route] methods of a controller: a path
+ * prefix, middleware that runs before each route's own, a name prefix, and
+ * the host and scheme a route inherits when it sets none.
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): prefix, middleware, and name
- * prefix apply regardless of protocol — HTTP, WebSocket, SSE, gRPC.
- * Spec V4.0: final readonly class with promoted constructor properties.
+ * Preconditions: AttributeRouteLoader joins the prefix and each pattern as
+ * written, dropping only a trailing "/" of the prefix. Host and scheme are
+ * carried to the route for the dispatcher; no matcher reads them yet
+ * (ADR-005, proposed).
  *
- * @see https://www.php.net/manual/en/language.attributes.php PHP Attributes
+ * Thread-safety: immutable.
  *
- * All {@see Route} attributes on methods of this class inherit
- * the prefix, middleware, name prefix, host, and scheme from here.
+ * Side effects: none.
  *
- *     #[Controller('/api/v1/users', middleware: [AuthMiddleware::class], namePrefix: 'users.')]
- *     class UserController { ... }
+ * Example:
+ *
+ *     #[Controller('/api/v1/users', middleware: ['auth'], namePrefix: 'users.')]
+ *     final class UserController
+ *     {
+ *         #[Route('/{id:int}', name: 'show')] // GET /api/v1/users/{id:int}, users.show
+ *         public function show(): void {}
+ *     }
+ *
+ * References: SPEC-001 §2.4; ADR-005; PHP attributes.
+ *
+ * @see https://www.php.net/manual/en/language.attributes.php
  */
-#[\Attribute(\Attribute::TARGET_CLASS)]
+#[Attribute(Attribute::TARGET_CLASS)]
 final readonly class Controller
 {
     /**
-     * @param list<class-string> $middleware
+     * @param list<string> $middleware definitions the dispatcher resolves, outermost first
      */
     public function __construct(
         public string $prefix = '',
@@ -31,6 +45,5 @@ final readonly class Controller
         public ?string $namePrefix = null,
         public ?string $host = null,
         public ?string $scheme = null,
-    ) {
-    }
+    ) {}
 }

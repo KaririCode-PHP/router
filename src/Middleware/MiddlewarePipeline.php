@@ -7,39 +7,60 @@ namespace KaririCode\Router\Middleware;
 use KaririCode\Router\Contract\Middleware;
 
 /**
- * Onion-model middleware pipeline.
+ * Runs a route's middleware around its handler, onion style: the first
+ * middleware in the list is the outermost layer, sees the context first
+ * and the result last. It works on the protocol-neutral context array of
+ * Middleware, so the same pipeline serves every protocol.
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): operates on array context,
- * not PSR-7 objects. PSR-15 adapter lives in Integration/.
+ * Preconditions: the middleware are instances; resolving MatchResult's
+ * middleware definitions to objects is the dispatcher's job. An exception
+ * from a layer or the handler propagates through the outer layers, which
+ * may catch it.
  *
- * Spec V4.0: final class, stateless — pipeline is rebuilt per request.
+ * Thread-safety: keeps no state; a pipeline can run many requests.
  *
- * Executes middleware in FIFO order, each receiving a `$next` callable
- * that invokes the remainder of the stack. The innermost handler is
- * the route's own action.
+ * Side effects: those of the middleware and the handler.
  *
- * @see https://www.php-fig.org/psr/psr-15/ PSR-15 (inspiration, decoupled)
+ * Example:
+ *
+ *     $pipeline = new MiddlewarePipeline();
+ *     $response = $pipeline->execute(
+ *         [new RequireTenant(), new MeasureLatency()],
+ *         static fn(array $context): array => ['tenant' => $context['tenant']],
+ *         ['tenant' => 'acme'],
+ *     );
+ *
+ * References: ADR-002; PSR-15, the model it follows without PSR-7.
+ *
+ * @see https://www.php-fig.org/psr/psr-15/
  */
-final class MiddlewarePipeline
+final readonly class MiddlewarePipeline
 {
     /**
-     * @param list<Middleware>           $middlewares
-     * @param callable(array<string,mixed>):mixed $handler   Innermost handler
-     * @param array<string, mixed>      $context    Protocol-decoded request context
-      *
-      * @see https://www.php-fig.org/psr/psr-15/ PSR-15 (inspiration, decoupled)
+     * @param list<Middleware>                      $middleware outermost first
+     * @param callable(array<string, mixed>): mixed $handler    the innermost layer
+     * @param array<string, mixed>                  $context    protocol-decoded request data
      */
-    public function execute(array $middlewares, callable $handler, array $context): mixed
+    public function execute(array $middleware, callable $handler, array $context): mixed
     {
-        $pipeline = $handler;
+        return $this->run($middleware, 0, $handler, $context);
+    }
 
-        // Build from inside out so first middleware in the list runs first
-        foreach (array_reverse($middlewares) as $middleware) {
-            $next = $pipeline;
-            $pipeline = static fn (array $ctx): mixed => $middleware->handle($ctx, $next);
+    /**
+     * Runs the layer at $index, or the handler once the layers run out.
+     *
+     * @param list<Middleware>                      $middleware
+     * @param callable(array<string, mixed>): mixed $handler
+     * @param array<string, mixed>                  $context
+     */
+    private function run(array $middleware, int $index, callable $handler, array $context): mixed
+    {
+        $layer = $middleware[$index] ?? null;
+
+        if ($layer === null) {
+            return $handler($context);
         }
 
-        return $pipeline($context);
+        return $layer->handle($context, fn(array $inner): mixed => $this->run($middleware, $index + 1, $handler, $inner));
     }
 }
-

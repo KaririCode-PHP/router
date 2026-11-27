@@ -7,43 +7,43 @@ namespace KaririCode\Router\Contract;
 use KaririCode\Router\Core\NormalizedRequest;
 
 /**
- * Extracts the (method, uri) pair from a protocol-specific request object.
+ * Reads the method and the path from one protocol's native request. Each
+ * protocol package implements it in its own namespace (kariricode/http has
+ * HttpNormalizer, kariricode/grpc has GrpcNormalizer), so the dependency
+ * always points at the router and a new protocol needs one new class and no
+ * change here.
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): each protocol package (HTTP,
- * WebSocket, SSE, gRPC) provides its own normalizer. Adding a new
- * protocol requires exactly one new class — no existing file changes.
- * Spec V4.0 §1.3: interface without "Interface" suffix.
+ * Preconditions: normalize() is called only for a request canNormalize()
+ * accepted; it returns the uppercase method and the path without query
+ * string. The parameter is `object` because the router cannot name the
+ * protocol types (accepted deviation, ADR-002).
  *
- * Each protocol (HTTP, gRPC, WebSocket, GraphQL, SSE, CLI, or any
- * future protocol) implements this contract to participate in routing.
+ * Thread-safety: implementations keep no state.
  *
- * Adding a new protocol requires exactly one new class. No existing
- * file is modified. No enum is extended. No switch is updated.
+ * Side effects: none; the original request is carried, not changed.
  *
- * The router core never depends on concrete normalizers — it accepts
- * raw strings. Normalizers exist so protocol packages can provide a
- * standard bridge without each application writing ad-hoc extraction.
+ * Example:
  *
- * @see \KaririCode\Router\Core\NormalizedRequest
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3 URI component extraction
+ *     final class CliNormalizer implements RequestNormalizer
+ *     {
+ *         public function canNormalize(object $request): bool { return $request instanceof CliInput; }
+ *
+ *         public function normalize(object $request): NormalizedRequest
+ *         {
+ *             assert($request instanceof CliInput);
+ *
+ *             return new NormalizedRequest('RUN', '/' . $request->command, $request);
+ *         }
+ *     }
+ *
+ * References: ADR-002 (protocol-agnostic design); tasks/todo.md (the V4.1
+ * protocol packages); RFC 3986 §3.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc3986#section-3
  */
 interface RequestNormalizer
 {
-    /**
-     * Whether this normalizer can handle the given request object.
-     *
-     * Used for automatic protocol detection when multiple normalizers
-     * are registered and the caller does not specify which one to use.
-     */
     public function canNormalize(object $request): bool;
 
-    /**
-     * Extracts the method string and URI path from the native request.
-     *
-     * The returned NormalizedRequest carries the original request object
-     * so handlers can access protocol-specific APIs (headers, body,
-     * streaming state, connection metadata, etc.) without the router
-     * needing to understand any of it.
-     */
     public function normalize(object $request): NormalizedRequest;
 }

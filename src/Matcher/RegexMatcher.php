@@ -9,177 +9,168 @@ use KaririCode\Router\Core\MatchResult;
 use KaririCode\Router\Core\RouteEntry;
 
 /**
- * Compiled group-regex matcher for parameterized routes.
+ * The second tier of CompositeRouteMatcher: routes with placeholders,
+ * joined per method into a few combined expressions, so a request costs one
+ * preg_match per chunk of routes instead of one per route.
  *
- * ARFA 1.3 P2 (Reactive Flow Composition): second stage of the
- * composite matcher pipeline, invoked only when StaticMatcher misses.
- * Spec V4.0: final class. Compilation is lazy (first match triggers it).
+ * Each chunk is a branch-reset group, `#\A(?|/users/([0-9]+)(*MARK:0)|
+ * /posts/([^/]+)/([^/]+)(*MARK:1))\z#u`. Branch reset numbers the groups of
+ * every alternative from 1, and the MARK verb names the alternative that
+ * matched, so captures map to parameters by position and two routes may
+ * share a parameter name. This is the mark-based technique of
+ * nikic/FastRoute; it replaces the backward walk over empty groups of 4.0,
+ * which never found a route (code review BUG-003), and named groups, which
+ * PCRE rejects when two routes in one chunk use the same name.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 URI path matching
+ * Preconditions: add() ignores routes without placeholders. Within a
+ * method, the first route registered wins when several patterns match one
+ * path. Compilation is lazy and repeats after every add().
  *
- * Groups routes by HTTP method and compiles them into chunked combined
- * regular expressions (mark-based approach). This yields O(1) regex
- * compilation cost per match, amortized over the chunk size.
+ * Thread-safety: written during boot, read afterwards.
  *
- * Technique adapted from nikic/FastRoute's "mark-based" strategy but
- * extended with typed parameter extraction and chunk-size tuning.
+ * Side effects: add() changes the route list and drops the compiled chunks.
  *
- * Chunk size of ~10 routes balances PCRE JIT efficiency against the
- * number of alternations.
+ * Example:
  *
- * @see https://nikic.github.io/2014/02/18/Fast-request-routing-using-regular-expressions.html
+ *     $matcher = new RegexMatcher();
+ *     $matcher->add(new RouteEntry(['GET'], '/users/{id:int}', 'users.show'));
+ *     $matcher->add(new RouteEntry(['GET'], '/posts/{id}', 'posts.show'));
+ *     $matcher->match('GET', '/posts/intro')?->parameters->get('id'); // 'intro'
+ *
+ * References: ADR-001; SPEC-001 §5.2; PCRE2 branch reset and backtracking
+ * control verbs; N. Popov, "Fast request routing using regular expressions".
+ *
+ * @see https://www.pcre.org/current/doc/html/pcre2pattern.html#SEC15
  */
 final class RegexMatcher implements RouteMatcher
 {
-    private const CHUNK_SIZE = 10;
+    /** Routes per combined expression, FastRoute's size for mark-based chunks. */
+    private const int CHUNK_SIZE = 30;
 
-    /** @var array<string, list<RouteEntry>> method → entries */
+    /** @var array<string, list<RouteEntry>> uppercase method to routes, in registration order */
     private array $routesByMethod = [];
 
-    /** @var array<string, list<array{regex:string,routeMap:array<int,RouteEntry>}>>|null */
+    /** @var array<string, list<array{regex: non-empty-string, routes: list<RouteEntry>}>>|null */
     private ?array $compiled = null;
 
+    /**
+     * Runs one combined expression against a path: the index of the
+     * alternative that matched and its captures, or null on a miss.
+     * CachedMatcher runs the same expressions from its stored table.
+     *
+     * @param non-empty-string $regex
+     *
+     * @return array{int, list<string>}|null
+     */
+    public static function locate(string $regex, string $uri): ?array
+    {
+        if (preg_match($regex, $uri, $matches) !== 1 || !isset($matches['MARK'])) {
+            return null;
+        }
+
+        $captures = [];
+
+        for ($group = 1; isset($matches[$group]); ++$group) {
+            $captures[] = $matches[$group];
+        }
+
+        return [(int) $matches['MARK'], $captures];
+    }
+
+    #[\Override]
     public function match(string $method, string $uri): ?MatchResult
     {
-        $this->ensureCompiled();
+        foreach ($this->compiled()[strtoupper($method)] ?? [] as $chunk) {
+            $hit = self::locate($chunk['regex'], $uri);
+            $route = $hit === null ? null : $chunk['routes'][$hit[0]] ?? null;
 
-        $methodKey = strtoupper($method);
-        $chunks = $this->compiled[$methodKey] ?? [];
-
-        foreach ($chunks as $chunk) {
-            if (!preg_match($chunk['regex'], $uri, $matches)) {
-                continue;
+            if ($hit !== null && $route !== null) {
+                return new MatchResult($route, $route->parametersFrom($hit[1]), $route->middleware);
             }
-
-            // The mark tells us which route matched inside the combined regex
-            $routeIndex = count($matches) - 1;
-
-            // Walk backwards to find the last non-empty group (the MARK)
-            while ($routeIndex > 0 && (!isset($matches[$routeIndex]) || $matches[$routeIndex] === '')) {
-                --$routeIndex;
-            }
-
-            $route = $chunk['routeMap'][$routeIndex] ?? null;
-            if ($route === null) {
-                continue;
-            }
-
-            $params = [];
-            foreach ($route->compiledPattern->parameterNames as $name) {
-                if (isset($matches[$name]) && $matches[$name] !== '') {
-                    $params[$name] = $matches[$name];
-                }
-            }
-
-            // Apply defaults
-            foreach ($route->defaults as $key => $default) {
-                $params[$key] ??= $default;
-            }
-
-            return new MatchResult(
-                route: $route,
-                rawParameters: $params,
-                middleware: $route->middleware,
-            );
         }
 
         return null;
     }
 
+    #[\Override]
     public function add(RouteEntry $route): void
     {
         if ($route->compiledPattern->isStatic) {
-            return; // Static routes handled by StaticMatcher
+            return;
         }
 
         foreach ($route->methods as $method) {
             $this->routesByMethod[$method][] = $route;
         }
 
-        $this->compiled = null; // Invalidate compilation cache
+        $this->compiled = null;
     }
 
+    #[\Override]
     public function allowedMethods(string $uri): array
     {
-        $this->ensureCompiled();
         $allowed = [];
 
-        foreach ($this->compiled as $method => $chunks) {
-            foreach ($chunks as $chunk) {
-                if (preg_match($chunk['regex'], $uri)) {
-                    $allowed[] = $method;
-                    break;
-                }
+        foreach ($this->compiled() as $method => $chunks) {
+            if (array_any($chunks, static fn(array $chunk): bool => self::locate($chunk['regex'], $uri) !== null)) {
+                $allowed[] = $method;
             }
         }
 
         return $allowed;
     }
 
-    // ── Compilation ──────────────────────────────────────────────────────
+    /**
+     * The routes per method, in registration order, without compiling.
+     *
+     * @return array<string, list<RouteEntry>>
+     */
+    public function exportRoutes(): array
+    {
+        return $this->routesByMethod;
+    }
 
-    private function ensureCompiled(): void
+    /**
+     * The compiled chunks per method, for CachedMatcher to write out.
+     *
+     * @return array<string, list<array{regex: non-empty-string, routes: list<RouteEntry>}>>
+     */
+    public function exportCompiled(): array
+    {
+        return $this->compiled();
+    }
+
+    /**
+     * @return array<string, list<array{regex: non-empty-string, routes: list<RouteEntry>}>>
+     */
+    private function compiled(): array
     {
         if ($this->compiled !== null) {
-            return;
+            return $this->compiled;
         }
 
-        $this->compiled = [];
+        $compiled = [];
 
         foreach ($this->routesByMethod as $method => $routes) {
-            $this->compiled[$method] = $this->compileChunks($routes);
+            $compiled[$method] = array_map(self::chunk(...), array_chunk($routes, self::CHUNK_SIZE));
         }
+
+        return $this->compiled = $compiled;
     }
 
     /**
      * @param list<RouteEntry> $routes
-     * @return list<array{regex:string,routeMap:array<int,RouteEntry>}>
+     *
+     * @return array{regex: non-empty-string, routes: list<RouteEntry>}
      */
-    private function compileChunks(array $routes): array
+    private static function chunk(array $routes): array
     {
-        $chunks = [];
+        $alternatives = [];
 
-        foreach (array_chunk($routes, self::CHUNK_SIZE) as $chunk) {
-            $combined = '';
-            $routeMap = [];
-            $groupOffset = 1; // Group 0 is the full match
-
-            foreach ($chunk as $route) {
-                $pattern = $route->compiledPattern;
-
-                // Strip anchors from individual regex for combining
-                $inner = substr($pattern->regex, 2, -3); // Remove #^ and $#u
-
-                $paramCount = count($pattern->parameterNames);
-
-                // Append with a dummy group at the end as a mark
-                $combined .= '|' . $inner . '()';
-
-                // The mark group index
-                $markIndex = $groupOffset + $paramCount;
-                $routeMap[$markIndex] = $route;
-                $groupOffset = $markIndex + 1;
-            }
-
-            $combined = '#^(?:' . substr($combined, 1) . ')$#u';
-
-            $chunks[] = [
-                'regex' => $combined,
-                'routeMap' => $routeMap,
-            ];
+        foreach ($routes as $index => $route) {
+            $alternatives[] = $route->compiledPattern->fragment . '(*MARK:' . $index . ')';
         }
 
-        return $chunks;
-    }
-
-    /**
-     * Export compiled data for caching.
-     *
-     * @return array<string, list<array{regex:string,routeMap:array<int,array{pattern:string,methods:list<string>,handler:mixed,name:?string,middleware:list<string>}>}>>
-     */
-    public function exportCompiled(): array
-    {
-        $this->ensureCompiled();
-        return $this->compiled;
+        return ['regex' => '#\\A(?|' . implode('|', $alternatives) . ')\\z#u', 'routes' => $routes];
     }
 }

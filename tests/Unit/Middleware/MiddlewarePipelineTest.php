@@ -4,96 +4,48 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Tests\Unit\Middleware;
 
-use KaririCode\Router\Contract\Middleware;
 use KaririCode\Router\Middleware\MiddlewarePipeline;
+use KaririCode\Router\Tests\Fixture\TraceMiddleware;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(MiddlewarePipeline::class)]
 final class MiddlewarePipelineTest extends TestCase
 {
-    public function testEmptyPipelineCallsHandler(): void
+    #[Test]
+    public function theFirstMiddlewareIsTheOutermostLayer(): void
     {
-        $pipeline = new MiddlewarePipeline();
-        $result = $pipeline->execute(
-            [],
-            fn (array $ctx): string => 'handled:' . $ctx['value'],
-            ['value' => 'test'],
+        $result = (new MiddlewarePipeline())->execute(
+            [new TraceMiddleware('a'), new TraceMiddleware('b'), new TraceMiddleware('c')],
+            static fn(array $context): string => (is_string($context['trace'] ?? null) ? $context['trace'] : '') . 'handler',
+            ['trace' => ''],
         );
 
-        self::assertSame('handled:test', $result);
+        self::assertSame('a>b>c>handler<c<b<a', $result);
     }
 
-    public function testMiddlewareExecutedInOrder(): void
+    #[Test]
+    public function aLayerCanShortCircuitTheRest(): void
     {
-        $log = [];
+        $reached = false;
+        $result = (new MiddlewarePipeline())->execute(
+            [new TraceMiddleware('a'), new TraceMiddleware('stop', shortCircuit: true), new TraceMiddleware('c')],
+            static function () use (&$reached): string {
+                $reached = true;
 
-        $mw1 = new class ($log) implements Middleware {
-            public function __construct(private array &$log) {}
-            public function handle(array $context, callable $next): mixed
-            {
-                $this->log[] = 'before:1';
-                $result = $next($context);
-                $this->log[] = 'after:1';
-                return $result;
-            }
-        };
-
-        $mw2 = new class ($log) implements Middleware {
-            public function __construct(private array &$log) {}
-            public function handle(array $context, callable $next): mixed
-            {
-                $this->log[] = 'before:2';
-                $result = $next($context);
-                $this->log[] = 'after:2';
-                return $result;
-            }
-        };
-
-        $pipeline = new MiddlewarePipeline();
-        $pipeline->execute(
-            [$mw1, $mw2],
-            fn (array $ctx): string => 'done',
+                return 'handler';
+            },
             [],
         );
 
-        self::assertSame(['before:1', 'before:2', 'after:2', 'after:1'], $log);
+        self::assertSame('a>stop!<a', $result);
+        self::assertFalse($reached);
     }
 
-    public function testMiddlewareCanModifyContext(): void
+    #[Test]
+    public function withoutMiddlewareTheHandlerGetsTheContext(): void
     {
-        $mw = new class implements Middleware {
-            public function handle(array $context, callable $next): mixed
-            {
-                $context['enriched'] = true;
-                return $next($context);
-            }
-        };
-
-        $pipeline = new MiddlewarePipeline();
-        $result = $pipeline->execute(
-            [$mw],
-            fn (array $ctx): bool => $ctx['enriched'] ?? false,
-            [],
-        );
-
-        self::assertTrue($result);
-    }
-
-    public function testMiddlewareCanShortCircuit(): void
-    {
-        $mw = new class implements Middleware {
-            public function handle(array $context, callable $next): mixed
-            {
-                return 'blocked';
-            }
-        };
-
-        $pipeline = new MiddlewarePipeline();
-        $result = $pipeline->execute(
-            [$mw],
-            fn (array $ctx): string => 'should-not-reach',
-            [],
-        );
-
-        self::assertSame('blocked', $result);
+        self::assertSame(['id' => 7], (new MiddlewarePipeline())->execute([], static fn(array $context): array => $context, ['id' => 7]));
     }
 }

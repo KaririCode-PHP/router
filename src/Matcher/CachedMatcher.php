@@ -4,366 +4,335 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Matcher;
 
+use Closure;
+use KaririCode\Router\Contract\RouteCacheStore;
 use KaririCode\Router\Contract\RouteMatcher;
 use KaririCode\Router\Core\MatchResult;
 use KaririCode\Router\Core\RouteEntry;
+use KaririCode\Router\Exception\RouteCacheException;
 use KaririCode\Router\Exception\RouteCompilationException;
 
 /**
- * OPcache-friendly cached matcher with dual-mode dispatching.
+ * Serves matches from a compiled route table kept in a RouteCacheStore, so
+ * a process that finds the table neither compiles patterns nor builds the
+ * combined expressions. warm() compiles the table from a
+ * CompositeRouteMatcher, typically in a deploy step; until a table exists,
+ * every call goes to the inner matcher.
  *
- * ARFA 1.3 P3 (Adaptive Optimization): zero regex compilation and
- * zero route registration after warm-up — the compiled route table
- * is stored as a PHP array file that OPcache serves from shared memory.
- * Spec V4.0: final class.
+ * The table holds the static map and the combined expressions with the
+ * routes as plain arrays, plus a checksum of those routes. When the inner
+ * matcher has routes of its own, the table is used only if its checksum
+ * matches them, so a table left behind by an older deploy is ignored
+ * instead of serving old routes. An application that skips registering
+ * routes when isCached() is true gets the full saving.
  *
- * Dual-mode operation:
+ * Preconditions: warm() needs a CompositeRouteMatcher as the inner matcher,
+ * handlers that are strings or [class, method] pairs (a Closure cannot be
+ * written out) and metadata of scalars, null and arrays; it throws
+ * RouteCompilationException otherwise. A matched route is rebuilt from the
+ * table, which compiles that one pattern again.
  *
- *   Cold (no cache file): delegates to the inner matcher for every
- *   request. Call {@see warm()} from a CLI command (e.g. route:cache)
- *   to compile the cache.
+ * Thread-safety: the store replaces the table atomically; an instance loads
+ * it once and keeps it for its lifetime.
  *
- *   Warm (cache file exists): loads the PHP array via {@see include},
- *   hitting OPcache directly. Static routes are resolved in O(1) via
- *   hash lookup. Parameterized routes use pre-compiled chunked regex
- *   — zero regex compilation, zero file I/O after the first include.
+ * Side effects: warm() and clear() write to the store; match() may read it
+ * once.
  *
- * Technique adapted from nikic/FastRoute's cached dispatcher and
- * Symfony's CompiledUrlMatcher, extended with typed parameter
- * extraction and protocol-agnostic method keys (ARFA 1.3 P4).
+ * Example:
  *
- * Handlers must be serializable (string or array). Closure-based
- * routes throw RouteCompilationException on warm(), matching
- * Laravel's route:cache behavior.
+ *     $matcher = new CachedMatcher(new CompositeRouteMatcher(), new PhpFileStore($cacheDir . '/routes.php'));
+ *     $router = new RouteRegistry($matcher);
  *
- * ADR-003: OPcache file cache chosen over serialized blobs for lowest
- * deserialization overhead. Atomic write via temp-file + rename
- * prevents partial reads under concurrent deploys.
+ *     if (!$matcher->isCached()) {
+ *         require __DIR__ . '/routes.php'; // registers on $router
+ *         $matcher->warm();
+ *     }
  *
- * @see https://www.php-fig.org/psr/psr-6/ PSR-6 Caching Interface
- * @see https://nikic.github.io/2014/02/18/Fast-request-routing-using-regular-expressions.html
+ * References: ADR-003 (route caching); SPEC-001 §5.3; the cached
+ * dispatchers of nikic/FastRoute and Symfony's CompiledUrlMatcher.
+ *
+ * @see https://www.php.net/manual/en/book.opcache.php
+ *
+ * @psalm-type CachedRoute = array{methods: non-empty-list<string>, pattern: string, handler: string|array{0: string, 1: string}, name: ?string, middleware: list<string>, defaults: array<string, string>, metadata: array<string, mixed>, host: ?string, scheme: ?string}
+ * @psalm-type CompiledTable = array{format: int, checksum: string, static: array<string, array<string, CachedRoute>>, dynamic: array<string, list<array{regex: non-empty-string, routes: list<CachedRoute>}>>}
  */
 final class CachedMatcher implements RouteMatcher
 {
-    /**
-     * Cached dispatch data loaded from the PHP array file.
-     *
-     * @var array{static:array,regex:array,checksum:string}|null
-     */
-    private ?array $cache = null;
+    /** Version of the table layout; a table of another version is ignored. */
+    private const int FORMAT = 1;
 
-    private bool $cacheLoaded = false;
+    /** @var CompiledTable|null */
+    private ?array $table = null;
+
+    private bool $loaded = false;
 
     public function __construct(
         private readonly RouteMatcher $inner,
-        private readonly string $cachePath,
-    ) {
-    }
+        private readonly RouteCacheStore $store,
+    ) {}
 
-    // ── RouteMatcher Contract ────────────────────────────────────────────
-
+    #[\Override]
     public function match(string $method, string $uri): ?MatchResult
     {
-        if ($this->loadCacheIfAvailable()) {
-            return $this->matchFromCache($method, $uri);
-        }
+        $table = $this->table();
 
-        return $this->inner->match($method, $uri);
+        return $table === null ? $this->inner->match($method, $uri) : self::matchTable($table, strtoupper($method), $uri);
     }
 
+    #[\Override]
     public function add(RouteEntry $route): void
     {
         $this->inner->add($route);
+        $this->forget();
     }
 
+    #[\Override]
     public function allowedMethods(string $uri): array
     {
-        if ($this->loadCacheIfAvailable()) {
-            return $this->allowedMethodsFromCache($uri);
-        }
+        $table = $this->table();
 
-        return $this->inner->allowedMethods($uri);
+        return $table === null ? $this->inner->allowedMethods($uri) : self::allowedFromTable($table, $uri);
     }
 
-    // ── Cache Lifecycle ──────────────────────────────────────────────────
-
     /**
-     * Compile and write the cache file from the current route definitions.
+     * Compiles the inner matcher's routes and saves the table.
      *
-     * Requires the inner matcher to be a {@see CompositeRouteMatcher}
-     * so compiled data can be extracted. Typically called from a CLI
-     * command (e.g. route:cache).
-     *
-     * @throws RouteCompilationException If the inner matcher is not a
-     *         CompositeRouteMatcher, if routes contain Closure handlers,
-     *         or if the file cannot be written.
+     * @throws RouteCompilationException when a route or the matcher cannot be written out
+     * @throws RouteCacheException       when the store refuses the table
      */
     public function warm(): void
     {
         if (!$this->inner instanceof CompositeRouteMatcher) {
-            throw RouteCompilationException::invalidPattern(
-                'CachedMatcher',
-                'Inner matcher must be CompositeRouteMatcher for cache export',
-            );
+            throw RouteCompilationException::uncacheableMatcher();
         }
 
-        $data = $this->exportFromComposite($this->inner);
-
-        $dir = dirname($this->cachePath);
-        if (!is_dir($dir) && !mkdir($dir, 0o755, true) && !is_dir($dir)) {
-            throw new RouteCompilationException(
-                "Cannot create cache directory: {$dir}",
-            );
-        }
-
-        // Atomic write: temp file + rename prevents partial reads
-        $tempPath = $this->cachePath . '.' . bin2hex(random_bytes(4)) . '.tmp';
-
-        try {
-            $content = "<?php\n\n// Auto-generated route cache — do not edit.\n"
-                . '// Generated: ' . date('Y-m-d H:i:s T') . "\n\n"
-                . 'return ' . var_export($data, true) . ";\n";
-
-            $bytes = file_put_contents($tempPath, $content, LOCK_EX);
-
-            if ($bytes === false) {
-                throw new RouteCompilationException(
-                    "Failed to write route cache: {$this->cachePath}",
-                );
-            }
-
-            rename($tempPath, $this->cachePath);
-
-            if (function_exists('opcache_invalidate')) {
-                opcache_invalidate($this->cachePath, true);
-            }
-
-            $this->cache = null;
-            $this->cacheLoaded = false;
-        } catch (RouteCompilationException $e) {
-            throw $e;
-        } catch (\Throwable $e) {
-            @unlink($tempPath);
-            throw new RouteCompilationException(
-                "Route cache compilation failed: {$e->getMessage()}",
-                $e,
-            );
-        }
+        $this->store->save(self::compile($this->inner));
+        $this->forget();
     }
 
+    /**
+     * Removes the stored table; matches go to the inner matcher again.
+     *
+     * @throws RouteCacheException when the store refuses the removal
+     */
     public function clear(): void
     {
-        if (is_file($this->cachePath)) {
-            unlink($this->cachePath);
-
-            if (function_exists('opcache_invalidate')) {
-                opcache_invalidate($this->cachePath, true);
-            }
-        }
-
-        $this->cache = null;
-        $this->cacheLoaded = false;
+        $this->store->clear();
+        $this->forget();
     }
 
+    /** True when a table of this version, fresh for the inner routes, is stored. */
     public function isCached(): bool
     {
-        return is_file($this->cachePath);
+        return $this->table() !== null;
     }
 
-    // ── Cache Loading ────────────────────────────────────────────────────
-
-    private function loadCacheIfAvailable(): bool
+    /**
+     * @return CompiledTable|null
+     */
+    private function table(): ?array
     {
-        if ($this->cacheLoaded) {
-            return $this->cache !== null;
+        if (!$this->loaded) {
+            $this->loaded = true;
+            $this->table = $this->freshTable($this->store->load());
         }
 
-        $this->cacheLoaded = true;
-
-        if (!is_file($this->cachePath)) {
-            return false;
-        }
-
-        $data = include $this->cachePath;
-
-        if (!is_array($data) || !isset($data['static'], $data['regex'], $data['checksum'])) {
-            return false;
-        }
-
-        $this->cache = $data;
-        return true;
+        return $this->table;
     }
 
-    // ── Cached Matching ──────────────────────────────────────────────────
-
-    private function matchFromCache(string $method, string $uri): ?MatchResult
+    private function forget(): void
     {
-        $methodKey = strtoupper($method);
+        $this->loaded = false;
+        $this->table = null;
+    }
 
-        // Fast path: O(1) static route lookup
-        $staticEntry = $this->cache['static'][$uri][$methodKey] ?? null;
-        if ($staticEntry !== null) {
-            return $this->buildResultFromCachedEntry($staticEntry, []);
+    /**
+     * @param array<array-key, mixed>|null $data
+     *
+     * @return CompiledTable|null
+     */
+    private function freshTable(?array $data): ?array
+    {
+        if ($data === null || !self::hasTableLayout($data)) {
+            return null;
         }
 
-        // Slow path: chunked regex matching
-        $chunks = $this->cache['regex'][$methodKey] ?? [];
+        if ($this->inner instanceof CompositeRouteMatcher && self::hasRoutes($this->inner) && self::checksumOrNull($this->inner) !== $data['checksum']) {
+            return null;
+        }
 
-        foreach ($chunks as $chunk) {
-            if (!preg_match($chunk['regex'], $uri, $matches)) {
-                continue;
+        /** @var CompiledTable $data */
+        return $data;
+    }
+
+    /**
+     * @param array<array-key, mixed> $data
+     */
+    private static function hasTableLayout(array $data): bool
+    {
+        return ($data['format'] ?? null) === self::FORMAT
+            && is_string($data['checksum'] ?? null)
+            && is_array($data['static'] ?? null)
+            && is_array($data['dynamic'] ?? null);
+    }
+
+    private static function hasRoutes(CompositeRouteMatcher $composite): bool
+    {
+        return $composite->staticMatcher->exportMap() !== [] || $composite->regexMatcher->exportRoutes() !== [];
+    }
+
+    /**
+     * @return CompiledTable
+     */
+    private static function compile(CompositeRouteMatcher $composite): array
+    {
+        $static = [];
+        $dynamic = [];
+
+        foreach ($composite->staticMatcher->exportMap() as $uri => $routes) {
+            foreach ($routes as $method => $route) {
+                $static[$uri][$method] = self::export($route);
             }
+        }
 
-            // Walk backwards to find the mark group (last non-empty capture)
-            $routeIndex = count($matches) - 1;
-            while ($routeIndex > 0 && (!isset($matches[$routeIndex]) || $matches[$routeIndex] === '')) {
-                --$routeIndex;
+        foreach ($composite->regexMatcher->exportCompiled() as $method => $chunks) {
+            foreach ($chunks as $chunk) {
+                $dynamic[$method][] = ['regex' => $chunk['regex'], 'routes' => array_map(self::export(...), $chunk['routes'])];
             }
+        }
 
-            $routeData = $chunk['routeMap'][$routeIndex] ?? null;
-            if ($routeData === null) {
-                continue;
+        return ['format' => self::FORMAT, 'checksum' => self::checksum($composite), 'static' => $static, 'dynamic' => $dynamic];
+    }
+
+    /**
+     * A digest of every route as the table writes it, in matching order.
+     *
+     * @throws RouteCompilationException when a route cannot be written out
+     */
+    private static function checksum(CompositeRouteMatcher $composite): string
+    {
+        $routes = [];
+
+        foreach ($composite->staticMatcher->exportMap() as $methods) {
+            foreach ($methods as $method => $route) {
+                $routes[] = [$method, self::export($route)];
             }
+        }
 
-            $params = [];
-            foreach ($routeData['params'] as $name) {
-                if (isset($matches[$name]) && $matches[$name] !== '') {
-                    $params[$name] = $matches[$name];
-                }
+        foreach ($composite->regexMatcher->exportRoutes() as $method => $entries) {
+            $routes[] = [$method, array_map(self::export(...), $entries)];
+        }
+
+        return hash('sha256', serialize($routes));
+    }
+
+    /** The checksum, or null when a route cannot be written out, which no table can match. */
+    private static function checksumOrNull(CompositeRouteMatcher $composite): ?string
+    {
+        try {
+            return self::checksum($composite);
+        } catch (RouteCompilationException) {
+            return null;
+        }
+    }
+
+    /**
+     * @return CachedRoute
+     *
+     * @throws RouteCompilationException when the route cannot be written out
+     */
+    private static function export(RouteEntry $route): array
+    {
+        $handler = $route->handler;
+
+        if ($handler instanceof Closure) {
+            throw RouteCompilationException::uncacheableRoute($route->pattern, 'a Closure handler cannot be written out; use a string or a [class, method] pair');
+        }
+
+        if (!self::isExportable($route->metadata)) {
+            throw RouteCompilationException::uncacheableRoute($route->pattern, 'its metadata holds a value other than a scalar, null or an array of those');
+        }
+
+        return [
+            'methods' => $route->methods,
+            'pattern' => $route->pattern,
+            'handler' => $handler,
+            'name' => $route->name,
+            'middleware' => $route->middleware,
+            'defaults' => $route->defaults,
+            'metadata' => $route->metadata,
+            'host' => $route->host,
+            'scheme' => $route->scheme,
+        ];
+    }
+
+    private static function isExportable(mixed $value): bool
+    {
+        return is_array($value)
+            ? array_all($value, static fn(mixed $item): bool => self::isExportable($item))
+            : $value === null || is_scalar($value);
+    }
+
+    /**
+     * @param CompiledTable $table
+     */
+    private static function matchTable(array $table, string $method, string $uri): ?MatchResult
+    {
+        $static = $table['static'][$uri][$method] ?? null;
+
+        if ($static !== null) {
+            $route = self::restore($static);
+
+            return new MatchResult($route, $route->defaults, $route->middleware);
+        }
+
+        foreach ($table['dynamic'][$method] ?? [] as $chunk) {
+            $hit = RegexMatcher::locate($chunk['regex'], $uri);
+            $data = $hit === null ? null : $chunk['routes'][$hit[0]] ?? null;
+
+            if ($hit !== null && $data !== null) {
+                $route = self::restore($data);
+
+                return new MatchResult($route, $route->parametersFrom($hit[1]), $route->middleware);
             }
-
-            foreach ($routeData['defaults'] as $key => $default) {
-                $params[$key] ??= $default;
-            }
-
-            return $this->buildResultFromCachedEntry($routeData, $params);
         }
 
         return null;
     }
 
-    private function allowedMethodsFromCache(string $uri): array
+    /**
+     * @param CompiledTable $table
+     *
+     * @return list<string>
+     */
+    private static function allowedFromTable(array $table, string $uri): array
     {
-        $allowed = [];
+        $allowed = array_keys($table['static'][$uri] ?? []);
 
-        if (isset($this->cache['static'][$uri])) {
-            $allowed = array_keys($this->cache['static'][$uri]);
-        }
-
-        foreach ($this->cache['regex'] as $method => $chunks) {
-            if (in_array($method, $allowed, true)) {
-                continue;
-            }
-            foreach ($chunks as $chunk) {
-                if (preg_match($chunk['regex'], $uri)) {
-                    $allowed[] = $method;
-                    break;
-                }
+        foreach ($table['dynamic'] as $method => $chunks) {
+            if (array_any($chunks, static fn(array $chunk): bool => RegexMatcher::locate($chunk['regex'], $uri) !== null)) {
+                $allowed[] = $method;
             }
         }
 
-        return $allowed;
+        return array_values(array_unique($allowed));
     }
 
     /**
-     * Reconstruct RouteEntry from cached data and build MatchResult.
-     *
-     * Individual pattern recompilation is O(1) and only happens once
-     * per matched request — the expensive chunked regex compilation
-     * (combining N routes into a single alternation) was cached.
-     *
-     * @param array<string, string> $params
+     * @param CachedRoute $data
      */
-    private function buildResultFromCachedEntry(array $routeData, array $params): MatchResult
+    private static function restore(array $data): RouteEntry
     {
-        $route = new RouteEntry(
-            methods: $routeData['methods'],
-            pattern: $routeData['pattern'],
-            handler: $routeData['handler'],
-            name: $routeData['name'],
-            middleware: $routeData['middleware'],
-            defaults: $routeData['defaults'],
-            metadata: $routeData['metadata'] ?? [],
-            host: $routeData['host'],
-            scheme: $routeData['scheme'],
+        return new RouteEntry(
+            methods: $data['methods'],
+            pattern: $data['pattern'],
+            handler: $data['handler'],
+            name: $data['name'],
+            middleware: $data['middleware'],
+            defaults: $data['defaults'],
+            metadata: $data['metadata'],
+            host: $data['host'],
+            scheme: $data['scheme'],
         );
-
-        return new MatchResult(
-            route: $route,
-            rawParameters: $params,
-            middleware: $route->middleware,
-        );
-    }
-
-    // ── Cache Export ─────────────────────────────────────────────────────
-
-    private function exportFromComposite(CompositeRouteMatcher $composite): array
-    {
-        $staticMap = $composite->getStaticMatcher()->exportMap();
-        $regexCompiled = $composite->getRegexMatcher()->exportCompiled();
-
-        $staticExport = [];
-        $checkParts = [];
-
-        foreach ($staticMap as $uri => $methodEntries) {
-            foreach ($methodEntries as $method => $entry) {
-                $this->assertSerializableHandler($entry);
-                $staticExport[$uri][$method] = $this->routeToArray($entry);
-                $checkParts[] = "{$method}:{$uri}";
-            }
-        }
-
-        $regexExport = [];
-        foreach ($regexCompiled as $method => $chunks) {
-            foreach ($chunks as $chunk) {
-                $exportedMap = [];
-                foreach ($chunk['routeMap'] as $index => $entry) {
-                    $this->assertSerializableHandler($entry);
-                    $exportedMap[$index] = $this->routeToArray($entry);
-                    $checkParts[] = "{$method}:{$entry->pattern}";
-                }
-                $regexExport[$method][] = [
-                    'regex' => $chunk['regex'],
-                    'routeMap' => $exportedMap,
-                ];
-            }
-        }
-
-        sort($checkParts);
-
-        return [
-            'static' => $staticExport,
-            'regex' => $regexExport,
-            'checksum' => hash('sha256', implode('|', $checkParts)),
-        ];
-    }
-
-    private function routeToArray(RouteEntry $entry): array
-    {
-        return [
-            'handler' => $entry->handler,
-            'name' => $entry->name,
-            'methods' => $entry->methods,
-            'pattern' => $entry->pattern,
-            'middleware' => $entry->middleware,
-            'defaults' => $entry->defaults,
-            'metadata' => $entry->metadata,
-            'host' => $entry->host,
-            'scheme' => $entry->scheme,
-            'params' => $entry->compiledPattern->parameterNames,
-        ];
-    }
-
-    /**
-     * @throws RouteCompilationException If handler is a Closure.
-     */
-    private function assertSerializableHandler(RouteEntry $entry): void
-    {
-        if ($entry->handler instanceof \Closure) {
-            throw RouteCompilationException::invalidPattern(
-                $entry->pattern,
-                'Closure handlers cannot be cached. Use [Controller::class, "method"] syntax.',
-            );
-        }
     }
 }

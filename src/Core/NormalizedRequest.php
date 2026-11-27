@@ -5,33 +5,33 @@ declare(strict_types=1);
 namespace KaririCode\Router\Core;
 
 /**
- * Protocol-agnostic request produced by a {@see \KaririCode\Router\Contract\RequestNormalizer}.
+ * The two strings the router matches on, taken from a protocol's native
+ * request by a RequestNormalizer, plus that request, kept so a handler can
+ * still reach headers, body or stream state the router never needed.
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): the two strings (method, uri)
- * are the only data the router needs. All protocol-specific state
- * stays in the original request object.
- * Spec V4.0: final readonly value object.
+ * Preconditions: $method is the uppercase method or operation (GET, UNARY,
+ * SUBSCRIBE, RUN); $uri is the path only, starting with "/", without query
+ * string or fragment.
  *
- * Carries only the two strings the router needs for matching plus
- * a reference to the original protocol-specific request for handler access.
+ * Thread-safety: immutable, though $original may itself be mutable.
  *
- * Intentionally thin: headers, body, attributes, and protocol semantics
- * stay in the original request object where they belong. The router
- * does not need to understand them.
+ * Side effects: none.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-3 URI components
+ * Example:
+ *
+ *     $request = $normalizer->normalize($serverRequest);
+ *     $result = $router->match($request->method, $request->uri);
+ *
+ * References: ADR-002 (protocol-agnostic design); RFC 3986 §3 (URI
+ * components).
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc3986#section-3
  */
 final readonly class NormalizedRequest
 {
-    /**
-     * @param string      $method   Uppercase method string (GET, UNARY, QUERY, SUBSCRIBE, RUN, …)
-     * @param string      $uri      URI path (always starts with /)
-     * @param object|null $original Native protocol request preserved for handler-level access
-     */
     public function __construct(
         public string $method,
         public string $uri,
         public ?object $original = null,
-    ) {
-    }
+    ) {}
 }

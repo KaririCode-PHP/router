@@ -7,168 +7,78 @@ namespace KaririCode\Router\Tests\Unit\Core;
 use KaririCode\Router\Attribute\Controller;
 use KaririCode\Router\Attribute\Route;
 use KaririCode\Router\Core\AttributeRouteLoader;
+use KaririCode\Router\Core\RouteEntry;
+use KaririCode\Router\Tests\Fixture\Controller\PlainController;
+use KaririCode\Router\Tests\Fixture\Controller\UserController;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
-// ── Test Fixtures ────────────────────────────────────────────────────
-
-#[Controller('/api/users', middleware: ['AuthMiddleware'], namePrefix: 'users.')]
-class StubUserController
-{
-    #[Route('/list', method: 'GET', name: 'list')]
-    public function list(): void {}
-
-    #[Route('/{id}', method: 'GET', name: 'show')]
-    public function show(int $id): void {}
-
-    #[Route('/', method: 'POST', name: 'create')]
-    public function create(): void {}
-}
-
-class StubNoControllerAttr
-{
-    #[Route('/standalone', method: 'GET', name: 'standalone')]
-    public function index(): void {}
-}
-
-#[Controller('/admin', host: 'admin.example.com', scheme: 'https')]
-class StubHostController
-{
-    #[Route('/dashboard', method: 'GET', name: 'dashboard')]
-    public function dashboard(): void {}
-
-    #[Route('/settings', method: ['GET', 'POST'], name: 'settings')]
-    public function settings(): void {}
-}
-
-// ── Tests ────────────────────────────────────────────────────────────
-
+#[CoversClass(AttributeRouteLoader::class)]
+#[CoversClass(Controller::class)]
+#[CoversClass(Route::class)]
 final class AttributeRouteLoaderTest extends TestCase
 {
-    private AttributeRouteLoader $loader;
-
-    protected function setUp(): void
+    #[Test]
+    public function itReadsEveryRouteOfThePublicMethods(): void
     {
-        $this->loader = new AttributeRouteLoader();
+        $routes = (new AttributeRouteLoader())->loadFromClass(UserController::class);
+
+        self::assertSame(
+            ['/api/v1/users/', '/api/v1/users/{id:int}', '/api/v1/users/', '/api/v1/users/bulk', '/api/v1/users/export'],
+            array_map(static fn(RouteEntry $route): string => $route->pattern, $routes),
+        );
+        self::assertSame(['users.index', 'users.show', 'users.store', null, null], array_map(static fn(RouteEntry $route): ?string => $route->name, $routes));
+        self::assertSame([UserController::class, 'store'], $routes[3]->handler);
     }
 
-    // ── Basic Discovery ──────────────────────────────────────────────────
-
-    public function testLoadsRoutesFromControllerClass(): void
+    #[Test]
+    public function controllerDefaultsApplyAndRouteValuesWin(): void
     {
-        $routes = $this->loader->loadFromClass(StubUserController::class);
+        [$index, $show, $store] = (new AttributeRouteLoader())->loadFromClass(UserController::class);
 
-        self::assertCount(3, $routes);
+        self::assertSame(['GET'], $index->methods);
+        self::assertSame(['auth'], $index->middleware);
+        self::assertSame('api.example.com', $index->host);
+        self::assertSame('https', $index->scheme);
+
+        self::assertSame(['GET', 'HEAD'], $show->methods);
+        self::assertSame(['auth', 'etag'], $show->middleware);
+        self::assertSame(['format' => 'json'], $show->defaults);
+        self::assertSame('admin.example.com', $show->host);
+        self::assertSame('wss', $show->scheme);
+        self::assertSame([UserController::class, 'show'], $show->handler);
+
+        self::assertSame(['POST'], $store->methods);
     }
 
-    public function testPrefixAppliedToRoutePatterns(): void
+    #[Test]
+    public function aClassWithoutControllerUsesNoPrefix(): void
     {
-        $routes = $this->loader->loadFromClass(StubUserController::class);
-
-        $patterns = array_map(fn ($r) => $r->pattern, $routes);
-        self::assertContains('/api/users/list', $patterns);
-        self::assertContains('/api/users/{id}', $patterns);
-        self::assertContains('/api/users/', $patterns);
-    }
-
-    public function testNamePrefixApplied(): void
-    {
-        $routes = $this->loader->loadFromClass(StubUserController::class);
-
-        $names = array_map(fn ($r) => $r->name, $routes);
-        self::assertContains('users.list', $names);
-        self::assertContains('users.show', $names);
-        self::assertContains('users.create', $names);
-    }
-
-    public function testMiddlewareInherited(): void
-    {
-        $routes = $this->loader->loadFromClass(StubUserController::class);
-
-        foreach ($routes as $route) {
-            self::assertContains('AuthMiddleware', $route->middleware);
-        }
-    }
-
-    public function testMethodsExtracted(): void
-    {
-        $routes = $this->loader->loadFromClass(StubUserController::class);
-
-        $byName = [];
-        foreach ($routes as $r) {
-            $byName[$r->name] = $r;
-        }
-
-        self::assertSame(['GET'], $byName['users.list']->methods);
-        self::assertSame(['POST'], $byName['users.create']->methods);
-    }
-
-    // ── Without Controller Attribute ─────────────────────────────────────
-
-    public function testClassWithoutControllerAttribute(): void
-    {
-        $routes = $this->loader->loadFromClass(StubNoControllerAttr::class);
+        $routes = (new AttributeRouteLoader())->loadFromClass(PlainController::class);
 
         self::assertCount(1, $routes);
-        self::assertSame('/standalone', $routes[0]->pattern);
-        self::assertSame('standalone', $routes[0]->name);
+        self::assertSame('/ping', $routes[0]->pattern);
+        self::assertSame(['SUBSCRIBE'], $routes[0]->methods);
+        self::assertSame('ping', $routes[0]->name);
         self::assertSame([], $routes[0]->middleware);
+        self::assertNull($routes[0]->host);
     }
 
-    // ── Host and Scheme Inheritance ──────────────────────────────────────
-
-    public function testHostInheritedFromController(): void
+    #[Test]
+    public function loadFromClassesJoinsTheClassesInOrder(): void
     {
-        $routes = $this->loader->loadFromClass(StubHostController::class);
+        $loader = new AttributeRouteLoader();
 
-        foreach ($routes as $route) {
-            self::assertSame('admin.example.com', $route->host);
-            self::assertSame('https', $route->scheme);
-        }
+        self::assertCount(6, $loader->loadFromClasses([PlainController::class, UserController::class]));
+        self::assertSame('/ping', $loader->loadFromClasses([PlainController::class, UserController::class])[0]->pattern);
+        self::assertSame([], $loader->loadFromClasses([]));
     }
 
-    public function testMultiMethodRoute(): void
+    #[Test]
+    public function theRouteAttributeNormalisesItsMethods(): void
     {
-        $routes = $this->loader->loadFromClass(StubHostController::class);
-
-        $settings = null;
-        foreach ($routes as $r) {
-            if ($r->name === 'settings') {
-                $settings = $r;
-            }
-        }
-
-        self::assertNotNull($settings);
-        self::assertSame(['GET', 'POST'], $settings->methods);
-    }
-
-    // ── loadFromClasses (batch) ──────────────────────────────────────────
-
-    public function testLoadFromMultipleClasses(): void
-    {
-        $routes = $this->loader->loadFromClasses([
-            StubUserController::class,
-            StubNoControllerAttr::class,
-        ]);
-
-        self::assertCount(4, $routes);
-    }
-
-    public function testEmptyClassListReturnsEmpty(): void
-    {
-        $routes = $this->loader->loadFromClasses([]);
-        self::assertSame([], $routes);
-    }
-
-    // ── Handler Format ───────────────────────────────────────────────────
-
-    public function testHandlerIsClassMethodPair(): void
-    {
-        $routes = $this->loader->loadFromClass(StubUserController::class);
-
-        foreach ($routes as $route) {
-            self::assertIsArray($route->handler);
-            self::assertSame(StubUserController::class, $route->handler[0]);
-            self::assertIsString($route->handler[1]);
-        }
+        self::assertSame(['GET'], (new Route('/x'))->methods);
+        self::assertSame(['UNARY', 'GET'], (new Route('/x', ['unary', 'GET']))->methods);
     }
 }

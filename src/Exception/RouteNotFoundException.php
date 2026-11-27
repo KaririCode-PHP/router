@@ -4,31 +4,45 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Exception;
 
+use KaririCode\Exception\NotFoundException;
+
 /**
- * No route matches the given method + URI pair.
+ * A lookup by identity found no route: no route accepts the request path
+ * (5010), or URL generation asked for a route name nobody registered
+ * (5021). It belongs to the NotFound family of kariricode/contract, so an
+ * edge that knows nothing of the router still answers 404.
  *
- * ARFA 1.3 P2: propagated from matcher to dispatcher.
+ * Preconditions: the matching message never repeats the request's method or
+ * path, which the client controls and may carry personal data (errata
+ * E-047); the caller already holds both. A route name is an identifier the
+ * application chose, so named() quotes it.
  *
- * Spec V4.0: final class with static factory.
+ * Thread-safety: an exception belongs to the call that threw it.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.5 HTTP 404 Not Found
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     try {
+ *         $result = $router->match($method, $path);
+ *     } catch (RouteNotFoundException) {
+ *         return $responses->notFound();
+ *     }
+ *
+ * References: KaririCode Spec V4.3.3 §8.1 (absent resource on get) and
+ * §8.4; RFC 9110 §15.5.5; ADR-007.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc9110#section-15.5.5
  */
-final class RouteNotFoundException extends RouterException
+final class RouteNotFoundException extends NotFoundException
 {
-    public static function forUri(string $method, string $uri): self
+    public static function forRequest(): self
     {
-        return new self($method, $uri);
+        return new self(RouterCode::RouteNotFound, 'No route matches the request method and path.');
     }
 
-    public function __construct(
-        string $method,
-        string $uri,
-        ?\Throwable $previous = null,
-    ) {
-        parent::__construct(
-            "No route matches {$method} {$uri}",
-            5110,
-            $previous,
-        );
+    public static function named(string $name): self
+    {
+        return new self(RouterCode::UnknownRouteName, sprintf('No route is named %s.', self::quote($name)));
     }
 }

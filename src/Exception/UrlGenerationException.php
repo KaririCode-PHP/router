@@ -4,38 +4,48 @@ declare(strict_types=1);
 
 namespace KaririCode\Router\Exception;
 
+use KaririCode\Exception\ValidationException;
+
 /**
- * URL generation failed (missing param, unknown route, constraint violation).
+ * The parameters given to RouteUrlGenerator::generate() cannot build a URI
+ * for the route: a placeholder has no value and no default (5020), or a
+ * value breaks the placeholder's type (5022). Corrected parameters succeed,
+ * which makes it a Validation failure. An unknown route name is
+ * RouteNotFoundException::named() instead.
  *
- * ARFA 1.3 P1: static factories produce immutable exception instances.
+ * Preconditions: the message names the route and the parameter, both
+ * identifiers the application chose, and never the rejected value, which
+ * often comes from user data (errata E-047).
  *
- * Spec V4.0: final class with static factories.
+ * Thread-safety: an exception belongs to the call that threw it.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986#section-5.3 URI reference resolution
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     $generator->generate('users.show', ['id' => 'abc']);
+ *     // UrlGenerationException [RO_5022]: the value for "id" breaks its {id:int} constraint
+ *
+ * References: KaririCode Spec V4.3.3 §8.4; RFC 3986 §5.3 (component
+ * recomposition); ADR-007.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc3986#section-5.3
  */
-final class UrlGenerationException extends RouterException
+final class UrlGenerationException extends ValidationException
 {
-    public static function missingParameter(string $routeName, string $param): self
+    public static function missingParameter(string $routeName, string $parameter): self
     {
         return new self(
-            "Missing required parameter '{$param}' for route '{$routeName}'",
-            5120,
+            RouterCode::MissingParameter,
+            sprintf('Route %s needs a value for the parameter %s.', self::quote($routeName), self::quote($parameter)),
         );
     }
 
-    public static function unknownRoute(string $routeName): self
+    public static function constraintViolation(string $routeName, string $parameter): self
     {
         return new self(
-            "Cannot generate URL for unknown route '{$routeName}'",
-            5121,
-        );
-    }
-
-    public static function constraintViolation(string $routeName, string $param, string $value): self
-    {
-        return new self(
-            "Value '{$value}' for parameter '{$param}' violates constraint on route '{$routeName}'",
-            5122,
+            RouterCode::ConstraintViolation,
+            sprintf('The value for the parameter %s of route %s breaks its type.', self::quote($parameter), self::quote($routeName)),
         );
     }
 }
