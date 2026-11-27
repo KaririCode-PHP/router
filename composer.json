@@ -1,0 +1,58 @@
+{
+    "name": "kariricode/router",
+    "description": "High-performance, protocol-agnostic routing engine with Adaptive Radix Tree matching, compiled caching, and attribute-based route definition for PHP 8.4+",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "router",
+        "routing",
+        "radix-tree",
+        "http",
+        "grpc",
+        "websocket",
+        "php84",
+        "kariricode",
+        "arfa"
+    ],
+    "authors": [
+        {
+            "name": "Walmir Silva",
+            "email": "walmir.silva@kariricode.org"
+        }
+    ],
+    "require": {
+        "php": ">=8.4",
+        "kariricode/contract": "^4.0"
+    },
+    "require-dev": {
+        "kariricode/devkit": "^4.0"
+    },
+    "suggest": {
+        "kariricode/cache": "For compiled route caching (recommended for production)",
+        "kariricode/event-dispatcher": "For route lifecycle events and observability",
+        "kariricode/configurator": "For file-based route configuration loading",
+        "kariricode/http": "For PSR-7/PSR-15 HTTP integration"
+    },
+    "autoload": {
+        "psr-4": {
+            "KaririCode\\Router\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "KaririCode\\Router\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true,
+        "optimize-autoloader": true
+    },
+    "extra": {
+        "arfa": {
+            "level": 1,
+            "version": "1.3"
+        }
+    }
+}
