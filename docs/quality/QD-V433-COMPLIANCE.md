@@ -68,7 +68,7 @@ Found during this import and fixed: `RouteEntry` declared a `callable` property,
 
 ## 5. Open items
 
-1. Release: the repository is private; the first tag (4.1.0) waits for the decision on visibility. The registry row moves to released with it.
+1. Release: done. The repository became public and 4.1.0 was tagged on 2026-11-27 (unsigned, see item on signed tags); the registry row moved to released in kariricode/exception 2.0.1.
 2. Signed tags (§32): releases are created from the GitHub UI, unsigned, for now.
 3. The ASVS 5.0 requirement map.
 4. ADR-004, ADR-005 and ADR-006 (4.2).

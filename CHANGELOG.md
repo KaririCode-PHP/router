@@ -6,7 +6,9 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
-To be released as 4.1.0, the version kariricode/http, sse and websocket require. 4.0.0 below was never tagged; the code imported from it did not load (a `callable` property) and its regex tier never matched a route, so this release is a rework more than an increment. [UPGRADE.md](UPGRADE.md) maps every change of API.
+## [4.1.0] — 2026-11-27
+
+The version kariricode/http, sse and websocket require. 4.0.0 below was never tagged; the code imported from it did not load (a `callable` property) and its regex tier never matched a route, so this release is a rework more than an increment. [UPGRADE.md](UPGRADE.md) maps every change of API.
 
 ### Added
 
