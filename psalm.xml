@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<psalm
+    errorLevel="1"
+    phpVersion="8.4"
+    findUnusedCode="false"
+    findUnusedBaselineEntry="false"
+    ensureOverrideAttribute="false"
+    resolveFromConfigFile="true"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns="https://getpsalm.org/schema/config"
+    xsi:schemaLocation="https://getpsalm.org/schema/config .kcode/vendor/vimeo/psalm/config.xsd"
+>
+    <projectFiles>
+        <directory name="src"/>
+    </projectFiles>
+    <!-- The PSR interface packages come with the toolchain (ADR-008); scanned, not analysed. -->
+    <extraFiles>
+        <directory name=".kcode/vendor/psr/event-dispatcher/src"/>
+        <directory name=".kcode/vendor/psr/simple-cache/src"/>
+    </extraFiles>
+</psalm>

@@ -1,0 +1,8 @@
+{
+    "parameters": {
+        "RouteEntry::__construct": "RouteEntry is the route value object: methods, pattern and handler plus six optional fields, each independent and set by named argument. A Parameter Object would only wrap RouteEntry itself (Spec V4.3.3 §13; QD §3).",
+        "Route::__construct": "The #[Route] attribute mirrors RouteEntry's optional fields; PHP passes attribute arguments only through the constructor, by name.",
+        "RouteRegistry::route": "Named-argument builder over RouteEntry's fields; addRoute(new RouteEntry(...)) is the Parameter Object form of the same call.",
+        "RouteGroup::map": "The group form of RouteRegistry::route(), with the same fields, so a group can set defaults and metadata too."
+    }
+}
